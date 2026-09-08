@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=linotch
+Comment=Usage notch for coding assistants and media
+Exec=linotch
+Icon=utilities-system-monitor
+Terminal=false
+Categories=Utility;

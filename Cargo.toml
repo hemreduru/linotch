@@ -1,0 +1,25 @@
+[package]
+name = "linotch"
+version = "0.1.0"
+edition = "2024"
+description = "A usage notch for Linux: coding-assistant limits and media, on a screen edge"
+license = "MIT"
+repository = "https://github.com/hemreduru/linotch"
+
+[dependencies]
+cairo-rs = "0.18"
+chrono = "0.4.45"
+dirs = "7.0.0"
+gdk = "0.18"
+glib = "0.18"
+gtk = "0.18"
+gtk-layer-shell = { version = "0.8.2", features = ["v0_6"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+ureq = { version = "3.4.1", features = ["json"] }
+zbus = "5.19.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
