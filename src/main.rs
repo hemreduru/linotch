@@ -67,6 +67,9 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.5);
+    if let Some(o) = std::env::var("LINOTCH_OPACITY").ok().and_then(|s| s.parse().ok()) {
+        draw::set_opacity(o);
+    }
 
     let shared = Arc::new(Mutex::new(Shared::default()));
     std::thread::spawn({
@@ -94,6 +97,7 @@ USAGE:
 ENVIRONMENT:
     LINOTCH_EDGE=right|left|top|bottom   screen edge to hug        (default: right)
     LINOTCH_OFFSET=0.0..1.0              position along that edge  (default: 0.5)
+    LINOTCH_OPACITY=0.35..1.0            panel opacity             (default: 0.74)
     LINOTCH_SURFACE=layer|x11|floating   override display-server detection",
         env!("CARGO_PKG_VERSION")
     );
@@ -210,7 +214,11 @@ fn worker(shared: Arc<Mutex<Shared>>) {
                     s.ring.note = "no limit windows reported".into();
                     s.next = now + POLL_OK;
                 }
-                Err(e @ (providers::Error::NoCredential | providers::Error::Rejected { .. })) => {
+                Err(
+                    e @ (providers::Error::NoCredential
+                    | providers::Error::Expired
+                    | providers::Error::Rejected { .. }),
+                ) => {
                     s.ring.health = Health::NeedsAuth;
                     s.ring.fraction = 0.0;
                     s.ring.rows.clear();

@@ -97,7 +97,26 @@ linotch --help
 |---|---|---|
 | `LINOTCH_EDGE` | `right` | `right`, `left`, `top`, `bottom` |
 | `LINOTCH_OFFSET` | `0.5` | position along that edge, `0.0`–`1.0` |
+| `LINOTCH_OPACITY` | `0.74` | panel opacity, `0.35`–`1.0` |
 | `LINOTCH_SURFACE` | auto | `layer`, `x11`, `floating` |
+
+The panel is translucent, not blurred: blurring behind a surface needs the
+compositor's own protocol (`org_kde_kwin_blur` on KWin, nothing portable), and no
+client can do it for itself. Opacity is the part that is honest everywhere.
+
+## When a ring is missing
+
+`linotch --check` says why, per source. The usual answers:
+
+- **`token expired — run \`claude\` once to refresh it`** — `~/.claude/.credentials.json`
+  is written by the Claude Code **CLI**. If you only ever use Claude Code inside the
+  desktop app, that file is never refreshed and its access token goes stale within
+  hours. Running `claude` in a terminal once rewrites it. linotch deliberately does
+  not refresh it itself: it borrows credentials, it does not manage them.
+- **`rate limited — retry in …`** — the vendor's own `Retry-After`, waited out in
+  full. Repeated failed auth is what earns one, which is why a token already known
+  to be expired is never sent.
+- **`not installed`** — no credential file for that tool on this machine.
 
 ## Adding a provider
 

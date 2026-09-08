@@ -29,9 +29,11 @@ pub struct Window {
 pub enum Error {
     /// No usable credential on this machine. Not a failure — the tool is signed out.
     NoCredential,
-    /// A credential exists but the vendor refused it. Kept apart from NoCredential
-    /// because the fix is different: this one is "use the tool once so it refreshes".
-    Rejected { code: u16, expired: bool },
+    /// The stored token's own expiry has passed. Detected locally — no request is
+    /// sent, see `Claude::read`.
+    Expired,
+    /// A credential looked current but the vendor refused it anyway.
+    Rejected { code: u16 },
     /// HTTP 429. `retry_after` is the vendor's own Retry-After in seconds — it is
     /// routinely far longer than any backoff we would guess (half an hour, where
     /// our cap was fifteen minutes), and ignoring it just keeps the limit alive.
@@ -43,11 +45,8 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::NoCredential => write!(f, "signed out"),
-            Error::Rejected { code, expired: true } => write!(
-                f,
-                "token expired ({code}) — run the tool once and it refreshes"
-            ),
-            Error::Rejected { code, expired: false } => {
+            Error::Expired => write!(f, "token expired — run `claude` once to refresh it"),
+            Error::Rejected { code } => {
                 write!(f, "token rejected ({code}) — sign in with the tool itself")
             }
             Error::RateLimited { retry_after: Some(s) } => {
@@ -124,14 +123,14 @@ fn agent() -> ureq::Agent {
 /// for one reason: a 429's `Retry-After` header only survives if the response object
 /// does, and that header is the difference between backing off correctly and
 /// hammering a limit until it renews itself.
-fn interpret(resp: &mut ureq::http::Response<ureq::Body>, expired: bool) -> Result<Value, Error> {
+fn interpret(resp: &mut ureq::http::Response<ureq::Body>) -> Result<Value, Error> {
     let code = resp.status().as_u16();
     match code {
         200..=299 => resp
             .body_mut()
             .read_json()
             .map_err(|e| Error::Other(format!("parse: {e}"))),
-        401 | 403 => Err(Error::Rejected { code, expired }),
+        401 | 403 => Err(Error::Rejected { code }),
         429 => Err(Error::RateLimited {
             retry_after: resp
                 .headers()
@@ -195,13 +194,21 @@ impl Provider for Claude {
 
     fn read(&self) -> Result<Vec<Window>, Error> {
         let (token, expired) = Self::credential().ok_or(Error::NoCredential)?;
+        if expired {
+            // Do not send it. The reply would be a 401, and repeated failed auth is
+            // exactly what this endpoint answers with a rate limit — which then also
+            // blocks the request that *would* have worked once the token is
+            // refreshed. Re-reading the file is free, so this costs nothing to
+            // recover from.
+            return Err(Error::Expired);
+        }
         let mut resp = agent()
             .get("https://api.anthropic.com/api/oauth/usage")
             .header("Authorization", &format!("Bearer {token}"))
             .header("anthropic-beta", "oauth-2025-04-20")
             .call()
             .map_err(|e| Error::Other(e.to_string()))?;
-        let v = interpret(&mut resp, expired)?;
+        let v = interpret(&mut resp)?;
 
         let mut out = Vec::new();
         if let Some(arr) = v.get("limits").and_then(|x| x.as_array()) {
@@ -300,7 +307,7 @@ impl Provider for Codex {
             )
             .call()
             .map_err(|e| Error::Other(e.to_string()))?;
-        let v = interpret(&mut resp, false)?;
+        let v = interpret(&mut resp)?;
 
         let rl = v.get("rate_limit").unwrap_or(&v);
         let now = now_secs();

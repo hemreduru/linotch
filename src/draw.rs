@@ -29,12 +29,29 @@ const ROW_H: f64 = 36.0;
 const HEAD_H: f64 = 30.0;
 
 // One palette, so a colour is never invented halfway down the file.
-const BG: (f64, f64, f64, f64) = (0.043, 0.043, 0.051, 0.94);
-const HAIRLINE: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.10);
-const TRACK: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.09);
+const BG_RGB: (f64, f64, f64) = (0.043, 0.043, 0.051);
+const DEFAULT_OPACITY: f64 = 0.74;
+const HAIRLINE: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.15);
+const TRACK: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.13);
 const INK: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.95);
 const INK_DIM: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.44);
 const DIVIDER: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.07);
+
+/// Panel opacity, set once from the environment. A single read point rather than a
+/// parameter threaded through every drawing function, because nothing changes it
+/// after startup.
+static OPACITY: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+
+/// Clamped, not free: below about 0.35 the text stops being readable over a light
+/// window, and a notch nobody can read is not a notch.
+pub fn set_opacity(v: f64) {
+    let _ = OPACITY.set(v.clamp(0.35, 1.0));
+}
+
+fn bg() -> (f64, f64, f64, f64) {
+    let (r, g, b) = BG_RGB;
+    (r, g, b, *OPACITY.get().unwrap_or(&DEFAULT_OPACITY))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
@@ -156,7 +173,7 @@ fn rgba(cr: &cairo::Context, c: (f64, f64, f64, f64)) {
 /// rectangle" from "a surface".
 fn panel(cr: &cairo::Context, rect: Rect, corners: (f64, f64, f64, f64)) {
     rounded(cr, rect, corners);
-    rgba(cr, BG);
+    rgba(cr, bg());
     let _ = cr.fill_preserve();
     // A short fall of light from the top edge. Flat fill plus hairline reads as a
     // rectangle; this reads as a surface with a direction to it.
@@ -513,8 +530,20 @@ fn preview() {
     // draw() clears its own clip first, so the backdrop goes on underneath at the
     // end rather than being painted first and wiped.
     cr.set_operator(cairo::Operator::DestOver);
-    cr.set_source_rgb(0.13, 0.14, 0.16);
+    // Something with structure behind the panels, or "transparent" and "dark grey"
+    // look identical.
+    let g = cairo::LinearGradient::new(0.0, 0.0, w as f64, h as f64);
+    g.add_color_stop_rgb(0.0, 0.16, 0.18, 0.24);
+    g.add_color_stop_rgb(0.5, 0.35, 0.24, 0.30);
+    g.add_color_stop_rgb(1.0, 0.12, 0.20, 0.22);
+    cr.set_source(&g).unwrap();
     cr.paint().unwrap();
+    for i in 0..7 {
+        let x = 30.0 + i as f64 * 62.0;
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.05);
+        cr.rectangle(x, 20.0 + (i % 3) as f64 * 40.0, 44.0, 120.0);
+        cr.fill().unwrap();
+    }
     drop(cr);
 
     let mut f = std::fs::File::create("/tmp/linotch-preview.png").unwrap();
