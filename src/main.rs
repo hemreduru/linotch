@@ -291,7 +291,6 @@ fn media_ring(m: &media::Media) -> Ring {
         // Paused is a current fact, not an old reading: dimming it would say "this
         // number may be wrong", which is not what is meant.
         health: Health::Ok,
-        neutral: true,
         action: Some(Action::PlayPause),
     }
 }
@@ -463,7 +462,7 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
                 return glib::Propagation::Stop;
             }
 
-            let next = match draw::hit(&l, x, y) {
+            let next = match draw::hit(&l, u.edge, x, y) {
                 Some(i) => Some(draw::Open { ring: i, kind: draw::Kind::Card }),
                 // Keep it open while the pointer is inside the panel it opened.
                 None if l.panel.map(|r| r.contains(x, y)).unwrap_or(false) => u.panel,
@@ -510,7 +509,7 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
             let l = draw::layout(&rings, u.edge, u.drawn());
 
             if ev.button() == 3 {
-                let ring = draw::hit(&l, x, y).unwrap_or(0);
+                let ring = draw::hit(&l, u.edge, x, y).unwrap_or(0);
                 u.open(draw::Open { ring, kind: draw::Kind::Menu });
                 drop(u);
                 ctx.animate();
@@ -531,7 +530,12 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
                 return glib::Propagation::Stop;
             }
 
-            u.drag = Some(Drag { grab: (x, y), moved: false });
+            // Only the body drags. Pressing inside an open card and moving must
+            // not haul the notch across the screen — the card is something you
+            // read, and the pointer travels over it constantly.
+            if l.rail.contains(x, y) {
+                u.drag = Some(Drag { grab: (x, y), moved: false });
+            }
             glib::Propagation::Stop
         }
     });
@@ -544,7 +548,8 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
                 return glib::Propagation::Stop;
             };
             if drag.moved {
-                ctx.drag_end(x, y);
+                let u = ctx.ui.borrow();
+                config::Config::save(u.edge, u.offset);
                 return glib::Propagation::Stop;
             }
             // Not a drag, so it was a click.
@@ -552,7 +557,9 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
             let u = ctx.ui.borrow();
             let l = draw::layout(&rings, u.edge, u.drawn());
             let bus = ctx.shared.lock().ok().and_then(|g| g.media_bus.clone());
-            let action = draw::hit(&l, x, y).and_then(|i| rings.get(i)).and_then(|r| r.action);
+            let action = draw::hit(&l, u.edge, x, y)
+                .and_then(|i| rings.get(i))
+                .and_then(|r| r.action);
             drop(u);
             if action == Some(Action::PlayPause) {
                 if let Some(bus) = bus {
@@ -692,15 +699,18 @@ impl Ctx {
         Some((px, py, mw, mh))
     }
 
-    /// Drag along the current edge.
+    /// Drag the notch.
     ///
-    /// Deliberately only along it: hopping between edges mid-drag meant re-anchoring
-    /// a live surface many times a second, and a notch that could end up attached to
-    /// no edge at all. The edge is decided once, when the button comes up.
+    /// The edge is re-decided as the pointer moves, so the notch travels with it
+    /// instead of staying put and teleporting on release. Two things keep that from
+    /// becoming the anchor storm it was before: the choice is sticky (the current
+    /// edge holds unless another is clearly nearer), so it changes only when the
+    /// pointer really crosses into another region; and moving edges re-creates the
+    /// surface, which is what makes the new anchor actually take.
     ///
-    /// Pointer positions are window-relative, so this works in deltas — nudge the
-    /// offset, let the window move, and the next event arrives that much closer to
-    /// the grab point again.
+    /// Along the edge it works in deltas — nudge the offset, let the window move,
+    /// and the next event arrives that much closer to the grab point again, because
+    /// Wayland only ever reports pointer positions relative to the window.
     fn drag_to(&self, x: f64, y: f64) {
         let (edge, offset, grab, moved) = {
             let u = self.ui.borrow();
@@ -726,6 +736,27 @@ impl Ctx {
             self.apply();
         }
 
+        let Some((px, py, mw, mh)) = self.pointer_on_screen(x, y) else { return };
+        let near = edge_for(px, py, mw, mh, edge);
+        if near != edge {
+            let mut u = self.ui.borrow_mut();
+            u.edge = near;
+            // The grab point was measured along an axis that no longer exists, so
+            // the offset is read straight off the pointer and the grab restarts.
+            u.offset = (if near.vertical() { py / mh } else { px / mw }).clamp(0.0, 1.0);
+            u.shown = ((0, 0), None);
+            if let Some(d) = u.drag.as_mut() {
+                d.grab = (x, y);
+            }
+            let (e, o) = (u.edge, u.offset);
+            drop(u);
+            self.surface.set_edge(&self.win, e);
+            self.apply();
+            self.surface.place(&self.win, e, o);
+            self.area.queue_draw();
+            return;
+        }
+
         let Some(mon) = surface::monitor_geometry(&self.win) else { return };
         let (span, along, grab_along) = if edge.vertical() {
             (mon.height() as f64, y, grab.1)
@@ -740,52 +771,37 @@ impl Ctx {
         self.surface.place(&self.win, e, o);
         self.area.queue_draw();
     }
-
-    /// The button came up after a drag: snap to whichever edge the pointer is
-    /// nearest, and remember it. Snapping here rather than continuously is what
-    /// makes it feel like a dock — it can only ever come to rest on an edge.
-    fn drag_end(&self, x: f64, y: f64) {
-        let Some((px, py, mw, mh)) = self.pointer_on_screen(x, y) else {
-            let u = self.ui.borrow();
-            config::Config::save(u.edge, u.offset);
-            return;
-        };
-        let near = nearest_edge(px, py, mw, mh);
-        let edge = self.ui.borrow().edge;
-        if near != edge {
-            let mut u = self.ui.borrow_mut();
-            u.edge = near;
-            // The grab point was measured along an axis that no longer exists, so
-            // the offset is read straight off the pointer.
-            u.offset = (if near.vertical() { py / mh } else { px / mw }).clamp(0.0, 1.0);
-            u.shown = ((0, 0), None);
-            let (e, o) = (u.edge, u.offset);
-            drop(u);
-            self.surface.set_edge(&self.win, e);
-            self.apply();
-            self.surface.place(&self.win, e, o);
-        }
-        let u = self.ui.borrow();
-        config::Config::save(u.edge, u.offset);
-    }
 }
 
-/// The edge a point on the screen belongs to: whichever one it is closest to.
+/// The edge a point on the screen belongs to, with the edge it is already on given
+/// a head start.
 ///
-/// That makes the four regions the triangles you get by drawing the screen's two
-/// diagonals, which is how every dock anybody has used behaves — drag towards a
-/// corner and the two edges meeting there split it evenly.
-fn nearest_edge(px: f64, py: f64, mw: f64, mh: f64) -> Edge {
-    [
-        (px, Edge::Left),
-        (mw - px, Edge::Right),
-        (py, Edge::Top),
-        (mh - py, Edge::Bottom),
-    ]
-    .into_iter()
-    .min_by(|a, b| a.0.total_cmp(&b.0))
-    .map(|(_, e)| e)
-    .unwrap_or(Edge::Right)
+/// Without the stickiness the four regions are the triangles the screen's diagonals
+/// cut, and a pointer wandering along a diagonal flips between two edges many times
+/// a second — each flip re-creating the surface. `STICK` means another edge has to
+/// be clearly nearer, not merely nearer, before the notch moves.
+const STICK: f64 = 0.7;
+
+fn edge_for(px: f64, py: f64, mw: f64, mh: f64, current: Edge) -> Edge {
+    // Distances are in halves of the screen, not pixels. On a 16:9 display the
+    // exact centre is 540px from the top and 960px from the side, so raw pixels
+    // call the middle of the screen "near the top" and the notch jumps there while
+    // still being dragged across open space.
+    let d = |e: Edge| match e {
+        Edge::Left => px / (mw / 2.0),
+        Edge::Right => (mw - px) / (mw / 2.0),
+        Edge::Top => py / (mh / 2.0),
+        Edge::Bottom => (mh - py) / (mh / 2.0),
+    };
+    let best = [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom]
+        .into_iter()
+        .min_by(|a, b| d(*a).total_cmp(&d(*b)))
+        .unwrap_or(current);
+    if d(best) < d(current) * STICK {
+        best
+    } else {
+        current
+    }
 }
 
 /// Restrict pointer events to where the notch is actually painted. Without this the
@@ -818,18 +834,32 @@ mod tests {
     }
 
     #[test]
-    fn a_drag_lands_on_the_edge_it_was_dropped_nearest() {
+    fn a_drag_moves_to_the_edge_it_is_taken_to() {
         let (w, h) = (1920.0, 1080.0);
-        assert_eq!(nearest_edge(10.0, 540.0, w, h), Edge::Left);
-        assert_eq!(nearest_edge(1900.0, 540.0, w, h), Edge::Right);
-        assert_eq!(nearest_edge(960.0, 5.0, w, h), Edge::Top);
-        assert_eq!(nearest_edge(960.0, 1070.0, w, h), Edge::Bottom);
-        // Dead centre of a 16:9 screen is nearer the top and bottom than the sides.
-        assert_eq!(nearest_edge(960.0, 540.0, w, h), Edge::Top);
-        // On a diagonal the two edges meeting at that corner are tied; either is a
-        // defensible answer, but it must be one of them and never the far side.
-        let corner = nearest_edge(100.0, 100.0, w, h);
-        assert!(matches!(corner, Edge::Left | Edge::Top), "got {corner:?}");
+        // Far into another region, from any starting edge.
+        assert_eq!(edge_for(10.0, 540.0, w, h, Edge::Right), Edge::Left);
+        assert_eq!(edge_for(1900.0, 540.0, w, h, Edge::Left), Edge::Right);
+        assert_eq!(edge_for(960.0, 5.0, w, h, Edge::Right), Edge::Top);
+        assert_eq!(edge_for(960.0, 1070.0, w, h, Edge::Top), Edge::Bottom);
+    }
+
+    #[test]
+    fn the_current_edge_holds_until_another_is_clearly_nearer() {
+        let (w, h) = (1920.0, 1080.0);
+        // Dead centre: nearer the top, but not by enough to leave the right edge.
+        assert_eq!(edge_for(960.0, 540.0, w, h, Edge::Right), Edge::Right);
+        // 300px in from both, but that is a third of the way down and only a sixth
+        // of the way across, so proportionally it belongs to the left edge.
+        assert_eq!(edge_for(300.0, 300.0, w, h, Edge::Left), Edge::Left);
+        assert_eq!(edge_for(300.0, 300.0, w, h, Edge::Top), Edge::Left);
+        // On the true diagonal the two edges meeting at that corner tie, and a tie
+        // leaves it on whichever of them it is already on.
+        assert_eq!(edge_for(480.0, 270.0, w, h, Edge::Top), Edge::Top);
+        assert_eq!(edge_for(480.0, 270.0, w, h, Edge::Left), Edge::Left);
+        // From the far side, though, it does cross.
+        assert_eq!(edge_for(480.0, 270.0, w, h, Edge::Right), Edge::Left);
+        // Right up against an edge, it wins from anywhere.
+        assert_eq!(edge_for(960.0, 2.0, w, h, Edge::Bottom), Edge::Top);
     }
 
     #[test]

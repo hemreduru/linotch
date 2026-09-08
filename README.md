@@ -23,9 +23,11 @@ A ring appears only when that tool is installed *and* signed in. The arc shows t
 window closest to its limit — the one that will actually stop you. Hovering opens a
 card beside it with every window, its own colour grade, and when it resets.
 
-Each ring carries its provider's own mark and its percentage underneath; the media
-ring carries the player's own application icon and the track position, and falls
-back to a play/pause control when the theme has no icon for it.
+Each ring carries its provider's own mark, in that provider's own colour, with its
+percentage underneath. The media ring carries the player's application icon and the
+track position, and takes its arc colour *from that icon* — weighted by saturation,
+so it picks up what the eye does rather than averaging to grey. Anything with no
+colour of its own falls back to the app's orange.
 
 Nothing is ever invented: when a vendor stops answering, the last reading stays,
 dimmed, and the card says why it is old. A rejected token says so, and says that
@@ -83,15 +85,17 @@ install -Dm644 linotch.desktop ~/.config/autostart/linotch.desktop
 Hover a ring for its card. Click the media ring to play/pause. Right-click anywhere
 on the notch for the menu.
 
-**Drag it.** Press and hold on the notch and move: it slides along its edge, and on
-release it snaps to whichever edge the pointer ended up nearest — the four regions
-being the triangles the screen's diagonals cut. It can only ever come to rest on an
-edge, never adrift in the middle.
+**Drag it.** Press and hold on the notch's body and move: it slides along its edge
+and crosses to another when the pointer does, so it goes where you take it instead
+of teleporting when you let go. Pressing inside an open card does nothing — that is
+something you read.
 
-The edge is decided on release rather than continuously on purpose. Re-anchoring a
-mapped `layer-shell` surface is not reliably picked up (KWin reads the anchor when
-the surface is created), so switching mid-drag left the notch attached to nothing.
-On release it happens once, and the surface is re-created rather than nudged.
+Two things keep the edge from flickering. Distances are measured in halves of the
+screen rather than pixels, so the middle of a 16:9 display is not "near the top";
+and the edge it is already on keeps it unless another is *clearly* nearer, so the
+diagonals are not a knife edge. Moving edges re-creates the surface rather than
+re-anchoring it, because KWin reads a layer surface's anchor when it is created and
+a live change left the notch attached to nothing at all.
 
 Where it ends up is saved to `~/.config/linotch/config.json` and restored on the
 next start. `LINOTCH_EDGE` / `LINOTCH_OFFSET` still win when set, so a one-off
@@ -133,11 +137,17 @@ screenshots. Upstream measured every distance off a 2000×2000 design frame and
 anchored the scale on one value — the provider ring is 44pt across and 117px in the
 frame — so [`src/draw.rs`](src/draw.rs) reproduces the same ratios from the same
 numbers, and the palette (`#00FF88` / `#F2FF00` / `#FF3F00`, `#303030` track,
-`#808080` secondary text) is upstream's sampled values.
+`#808080` secondary text) is upstream's sampled values. One number differs: the
+whole scale is multiplied by 0.85, because upstream is sized to sit in a Mac's menu
+bar and reads as too big on a desktop screen.
 
 That includes the parts that carry the character: the inverse-rounded flares where
 the body meets the bezel, the thin progress arc riding down the middle of the thick
 track, the percentage under each ring, and the tail on the hover card.
+
+On a top or bottom edge the body is thicker, because a percentage that sits *below*
+its ring costs length when the rings are stacked and depth when they are in a row.
+Sizing both the same is what clipped the percentages off a horizontal notch.
 
 One thing is deliberately different. codenotch draws the card in a second window;
 linotch has a single surface, so the card lives inside it. A layer-shell surface is

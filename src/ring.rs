@@ -60,8 +60,6 @@ pub struct Ring {
     pub fraction: f64,
     pub glyph: Glyph,
     pub health: Health,
-    /// Media rings are blue and neutral; usage rings grade green → amber → red.
-    pub neutral: bool,
     /// A click on this ring does something.
     pub action: Option<Action>,
 }
@@ -81,7 +79,6 @@ impl Ring {
             fraction: 0.0,
             glyph: Glyph::Brand { asset, color },
             health: Health::Idle,
-            neutral: false,
             action: None,
         }
     }

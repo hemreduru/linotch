@@ -63,8 +63,11 @@ pub trait Provider: Send {
     /// Name of the embedded brand mark in `assets/` (see `icons`).
     fn asset(&self) -> &'static str;
     /// The mark's colour. Brand colours are what make the rail readable at a
-    /// glance without labels.
-    fn brand(&self) -> (f64, f64, f64);
+    /// glance without labels; a provider with no colour of its own inherits the
+    /// app's accent rather than going grey.
+    fn brand(&self) -> (f64, f64, f64) {
+        crate::draw::FALLBACK
+    }
     /// Offline, cheap. False means the tool is not installed and no ring is drawn.
     fn present(&self) -> bool;
     fn read(&self) -> Result<Vec<Window>, Error>;
@@ -183,7 +186,7 @@ impl Provider for Claude {
         "claude"
     }
     fn brand(&self) -> (f64, f64, f64) {
-        (0.851, 0.467, 0.341) // #d97757
+        (0.851, 0.467, 0.341) // #d97757, Anthropic's own
     }
 
     /// A signed-in Claude Code, not merely a `~/.claude` left behind by one. An
@@ -287,7 +290,7 @@ impl Provider for Codex {
         "openai"
     }
     fn brand(&self) -> (f64, f64, f64) {
-        (1.0, 1.0, 1.0)
+        (0.063, 0.639, 0.498) // #10a37f
     }
 
     fn present(&self) -> bool {

@@ -18,8 +18,10 @@ use gtk::pango;
 use std::f64::consts::PI;
 
 /// Points per pixel of codenotch's design frame: the ring is 44pt across and
-/// measures 117px there.
-const SCALE: f64 = 44.0 / 117.0;
+/// measures 117px there — times 0.85, because upstream is sized for a Mac's menu
+/// bar and this reads as too big on a desktop screen. One number, so everything
+/// shrinks together and the proportions stay upstream's.
+const SCALE: f64 = (44.0 / 117.0) * 0.85;
 
 /// A distance measured in design-frame pixels.
 const fn px(frame_px: f64) -> f64 {
@@ -85,14 +87,18 @@ const BAR_TRACK: (f64, f64, f64, f64) = (0.176, 0.176, 0.176, 1.0); // #2d2d2d
 const AMPLE: (f64, f64, f64) = (0.0, 1.0, 0.533); // #00ff88
 const WATCH: (f64, f64, f64) = (0.949, 1.0, 0.0); // #f2ff00
 const CRITICAL: (f64, f64, f64) = (1.0, 0.247, 0.0); // #ff3f00
-const NEUTRAL: (f64, f64, f64) = (1.0, 1.0, 1.0); // media: outside the usage scale
+/// Anything with no colour of its own: upstream's Claude mark colour, which is
+/// also the app's own accent.
+pub const FALLBACK: (f64, f64, f64) = (0.851, 0.467, 0.341); // #d97757
 const TEXT: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 1.0);
 const TEXT_SECONDARY: (f64, f64, f64, f64) = (0.502, 0.502, 0.502, 1.0); // #808080
 
-/// codenotch's bands: under half is ample, then watch, then critical.
-pub fn band(fraction: f64, neutral: bool) -> (f64, f64, f64) {
-    if neutral {
-        return NEUTRAL;
+/// codenotch's bands: under half is ample, then watch, then critical. A ring with
+/// an accent of its own — media, coloured from the player's icon — is outside the
+/// usage scale and keeps it.
+pub fn band(fraction: f64, accent: Option<(f64, f64, f64)>) -> (f64, f64, f64) {
+    if let Some(c) = accent {
+        return c;
     }
     match fraction {
         f if f < 0.50 => AMPLE,
@@ -171,9 +177,27 @@ fn cell_extent() -> f64 {
     RING_D + RING_LABEL_GAP + line(FONT_PERCENT)
 }
 
-fn rail_run(n: usize) -> f64 {
+/// How thick the body is. On a vertical edge the percent sits *below* its ring, so
+/// it costs length; on a horizontal one the cells stand side by side and the label
+/// hangs under each, so it costs depth instead. Sizing both the same is what left
+/// the percentages clipped off a top-edge notch.
+fn rail_depth(edge: Edge) -> f64 {
+    if edge.vertical() {
+        RAIL_DEPTH
+    } else {
+        RAIL_DEPTH + RING_LABEL_GAP + line(FONT_PERCENT)
+    }
+}
+
+/// How much of the edge one cell takes up — the whole cell when stacked, just the
+/// ring when laid out in a row.
+fn along_extent(edge: Edge) -> f64 {
+    if edge.vertical() { cell_extent() } else { RING_D }
+}
+
+fn rail_run(n: usize, edge: Edge) -> f64 {
     let n = n.max(1) as f64;
-    2.0 * CURL + PAD_LEAD + n * cell_extent() + (n - 1.0) * CELL_SPACING + PAD_TRAIL
+    2.0 * CURL + PAD_LEAD + n * along_extent(edge) + (n - 1.0) * CELL_SPACING + PAD_TRAIL
 }
 
 fn menu_height() -> f64 {
@@ -222,28 +246,31 @@ fn card_height(ring: &Ring) -> f64 {
 /// the pointer crossed a ring. The length is therefore computed from the tallest
 /// card *any* ring could open, hovered or not, and only the depth changes.
 pub fn layout(rings: &[Ring], edge: Edge, open: Option<Open>) -> Layout {
-    let run = rail_run(rings.len())
+    let thick = rail_depth(edge);
+    let run = rail_run(rings.len(), edge)
         .max(rings.iter().map(card_height).fold(0.0_f64, f64::max))
         .max(menu_height());
-    let depth = RAIL_DEPTH
-        + if open.is_some() { widest_panel() + TAIL_LEN + TAIL_GAP } else { 0.0 };
+    let depth = thick + if open.is_some() { widest_panel() + TAIL_LEN + TAIL_GAP } else { 0.0 };
 
     let (w, h) = if edge.vertical() { (depth, run) } else { (run, depth) };
     let rail = match edge {
-        Edge::Right => Rect { x: w - RAIL_DEPTH, y: 0.0, w: RAIL_DEPTH, h },
-        Edge::Left => Rect { x: 0.0, y: 0.0, w: RAIL_DEPTH, h },
-        Edge::Bottom => Rect { x: 0.0, y: h - RAIL_DEPTH, w, h: RAIL_DEPTH },
-        Edge::Top => Rect { x: 0.0, y: 0.0, w, h: RAIL_DEPTH },
+        Edge::Right => Rect { x: w - thick, y: 0.0, w: thick, h },
+        Edge::Left => Rect { x: 0.0, y: 0.0, w: thick, h },
+        Edge::Bottom => Rect { x: 0.0, y: h - thick, w, h: thick },
+        Edge::Top => Rect { x: 0.0, y: 0.0, w, h: thick },
     };
 
-    // Cells run along the body, which starts one curl in from each end.
+    // Cells run along the body, which starts one curl in from each end. Across it,
+    // a stacked ring is centred and a side-by-side one is pushed up to leave its
+    // label room underneath.
     let start = CURL + PAD_LEAD;
+    let inset = (RAIL_DEPTH - RING_D) / 2.0 + RING_D / 2.0;
     let centers = (0..rings.len().max(1))
         .map(|i| {
-            let along = start + RING_D / 2.0 + i as f64 * (cell_extent() + CELL_SPACING);
+            let along = start + RING_D / 2.0 + i as f64 * (along_extent(edge) + CELL_SPACING);
             match edge {
-                Edge::Right | Edge::Left => (rail.x + RAIL_DEPTH / 2.0, along),
-                _ => (along, rail.y + RAIL_DEPTH / 2.0),
+                Edge::Right | Edge::Left => (rail.x + thick / 2.0, along),
+                _ => (along, rail.y + inset),
             }
         })
         .collect::<Vec<_>>();
@@ -293,11 +320,18 @@ pub fn menu_hit(rect: Rect, x: f64, y: f64) -> Option<usize> {
 
 /// Which ring contains the point, if any. The target is the whole cell, not the
 /// stroke: a 3 pt arc is not something anyone can click on purpose.
-pub fn hit(l: &Layout, x: f64, y: f64) -> Option<usize> {
-    let reach = (cell_extent() + CELL_SPACING) / 2.0;
+pub fn hit(l: &Layout, edge: Edge, x: f64, y: f64) -> Option<usize> {
+    if !l.rail.contains(x, y) {
+        return None;
+    }
+    let reach = (along_extent(edge) + CELL_SPACING) / 2.0;
     l.centers.iter().position(|(cx, cy)| {
-        let (dx, dy) = ((x - cx).abs(), (y - cy).abs());
-        dx <= RAIL_DEPTH / 2.0 && dy <= reach || dy <= RAIL_DEPTH / 2.0 && dx <= reach
+        let (along, across) = if edge.vertical() {
+            ((y - cy).abs(), (x - cx).abs())
+        } else {
+            ((x - cx).abs(), (y - cy).abs())
+        };
+        along <= reach && across <= rail_depth(edge) / 2.0 + RING_LABEL_GAP
     })
 }
 
@@ -547,6 +581,17 @@ fn menu(cr: &cairo::Context, rect: Rect, hot: Option<usize>) {
     }
 }
 
+/// A media ring takes its colour from the player's own icon; everything else
+/// grades on usage.
+fn accent_of(ring: &Ring) -> Option<(f64, f64, f64)> {
+    match &ring.glyph {
+        Glyph::Player { desktop_entry, .. } => {
+            Some(icons::dominant(desktop_entry, 32).unwrap_or(FALLBACK))
+        }
+        _ => None,
+    }
+}
+
 fn ring_at(cr: &cairo::Context, ring: &Ring, cx: f64, cy: f64, lit: f64) {
     let a = ring.alpha();
     // strokeBorder: the track sits inside the diameter, so both strokes share the
@@ -571,7 +616,7 @@ fn ring_at(cr: &cairo::Context, ring: &Ring, cx: f64, cy: f64, lit: f64) {
     let _ = cr.stroke();
 
     if ring.fraction > 0.0 {
-        let (cr_, cg, cb) = band(ring.fraction, ring.neutral);
+        let (cr_, cg, cb) = band(ring.fraction, accent_of(ring));
         cr.new_path();
         cr.set_line_width(PROGRESS_STROKE);
         cr.set_line_cap(cairo::LineCap::Round);
@@ -583,9 +628,8 @@ fn ring_at(cr: &cairo::Context, ring: &Ring, cx: f64, cy: f64, lit: f64) {
 
     cr.new_path();
     match &ring.glyph {
-        Glyph::Brand { asset, .. } => {
-            // Upstream draws every mark in textPrimary, not in brand colour.
-            icons::brand(cr, asset, cx, cy, GLYPH, (1.0, 1.0, 1.0, a));
+        Glyph::Brand { asset, color } => {
+            icons::brand(cr, asset, cx, cy, GLYPH, (color.0, color.1, color.2, a));
         }
         Glyph::Player { desktop_entry, playing } => {
             if !icons::app(cr, desktop_entry, cx, cy, GLYPH as i32) {
@@ -634,8 +678,15 @@ fn card(cr: &cairo::Context, rect: Rect, ring: &Ring) {
     let mut y = rect.y + CARD_PAD;
 
     match &ring.glyph {
-        Glyph::Brand { asset, .. } => {
-            icons::brand(cr, asset, x + GLYPH / 2.0, y + line(FONT_TITLE) / 2.0, GLYPH, TEXT);
+        Glyph::Brand { asset, color } => {
+            icons::brand(
+                cr,
+                asset,
+                x + GLYPH / 2.0,
+                y + line(FONT_TITLE) / 2.0,
+                GLYPH,
+                (color.0, color.1, color.2, 1.0),
+            );
         }
         Glyph::Player { desktop_entry, playing } => {
             let (gx, gy) = (x + GLYPH / 2.0, y + line(FONT_TITLE) / 2.0);
@@ -664,7 +715,7 @@ fn card(cr: &cairo::Context, rect: Rect, ring: &Ring) {
         y += line(FONT_BODY);
         if let Some(f) = row.bar {
             y += LABEL_TO_BAR;
-            bar(cr, x, y, w, f, band(f, ring.neutral), ring.alpha());
+            bar(cr, x, y, w, f, band(f, accent_of(ring)), ring.alpha());
             y += BAR_H + BAR_TO_USED;
         }
         text(cr, x, y, w, &row.value, FONT_BODY, pango::Weight::Normal, TEXT, pango::Alignment::Left);
@@ -703,7 +754,7 @@ mod tests {
             for hover in [None, card_on(0), card_on(3)] {
                 let l = layout(&rings, edge, hover);
                 for (i, &(x, y)) in l.centers.iter().enumerate() {
-                    assert_eq!(hit(&l, x, y), Some(i), "{edge:?} hover={hover:?} ring {i}");
+                    assert_eq!(hit(&l, edge, x, y), Some(i), "{edge:?} hover={hover:?} ring {i}");
                     assert!(l.rail.contains(x, y), "{edge:?} ring {i} not on the body");
                 }
             }
@@ -779,13 +830,14 @@ mod tests {
     /// Bands are upstream's, and the boundaries are the part worth pinning.
     #[test]
     fn bands_match_upstream() {
-        assert_eq!(band(0.0, false), AMPLE);
-        assert_eq!(band(0.499, false), AMPLE);
-        assert_eq!(band(0.5, false), WATCH);
-        assert_eq!(band(0.699, false), WATCH);
-        assert_eq!(band(0.7, false), CRITICAL);
-        assert_eq!(band(1.5, false), CRITICAL);
-        assert_eq!(band(0.9, true), NEUTRAL);
+        assert_eq!(band(0.0, None), AMPLE);
+        assert_eq!(band(0.499, None), AMPLE);
+        assert_eq!(band(0.5, None), WATCH);
+        assert_eq!(band(0.699, None), WATCH);
+        assert_eq!(band(0.7, None), CRITICAL);
+        assert_eq!(band(1.5, None), CRITICAL);
+        // An accent overrides the scale outright.
+        assert_eq!(band(0.9, Some(FALLBACK)), FALLBACK);
     }
 }
 
@@ -839,7 +891,6 @@ fn preview() {
             fraction: 0.44,
             glyph: Glyph::Player { desktop_entry: "spotify".into(), playing: true },
             health: Health::Ok,
-            neutral: true,
             action: Some(Action::PlayPause),
         },
     ];
