@@ -97,7 +97,7 @@ USAGE:
 ENVIRONMENT:
     LINOTCH_EDGE=right|left|top|bottom   screen edge to hug        (default: right)
     LINOTCH_OFFSET=0.0..1.0              position along that edge  (default: 0.5)
-    LINOTCH_OPACITY=0.35..1.0            panel opacity             (default: 0.74)
+    LINOTCH_OPACITY=0.35..1.0            panel opacity             (default: 1.0)
     LINOTCH_SURFACE=layer|x11|floating   override display-server detection",
         env!("CARGO_PKG_VERSION")
     );
@@ -165,7 +165,7 @@ fn worker(shared: Arc<Mutex<Shared>>) {
         .into_iter()
         .filter(|p| p.present())
         .map(|p| Slot {
-            ring: Ring::usage(p.label(), p.asset(), p.brand()),
+            ring: Ring::usage(&format!("{} Usage", p.label()), p.asset(), p.brand()),
             provider: p,
             fails: 0,
             next: Instant::now(),
@@ -192,18 +192,19 @@ fn worker(shared: Arc<Mutex<Shared>>) {
                         .max_by(|a, b| a.used.total_cmp(&b.used))
                         .expect("non-empty");
                     s.ring.fraction = worst.used;
+                    s.ring.percent = format!("{:.0}%", worst.used * 100.0);
                     s.ring.health = Health::Ok;
                     s.ring.note.clear();
                     s.ring.rows = ws
                         .iter()
                         .map(|w| Row {
                             label: w.label.clone(),
-                            value: format!("{:.0}%", w.used * 100.0),
+                            value: format!("{:.0}% Used", w.used * 100.0),
                             bar: Some(w.used),
                             note: w
                                 .resets_at
-                                .map(providers::until)
-                                .unwrap_or_else(|| String::new()),
+                                .map(|t| format!("Resets {}", providers::until(t)))
+                                .unwrap_or_default(),
                         })
                         .collect();
                     s.fails = 0;
@@ -221,6 +222,7 @@ fn worker(shared: Arc<Mutex<Shared>>) {
                 ) => {
                     s.ring.health = Health::NeedsAuth;
                     s.ring.fraction = 0.0;
+                    s.ring.percent.clear();
                     s.ring.rows.clear();
                     s.ring.note = e.to_string();
                     s.next = now + POLL_NO_CREDENTIAL;
@@ -269,6 +271,7 @@ fn worker(shared: Arc<Mutex<Shared>>) {
 fn media_ring(m: &media::Media) -> Ring {
     Ring {
         label: m.identity.clone(),
+        percent: if m.has_progress { clock(m.position) } else { String::new() },
         note: m.title.clone(),
         rows: vec![Row {
             label: if m.artist.is_empty() {
@@ -276,9 +279,13 @@ fn media_ring(m: &media::Media) -> Ring {
             } else {
                 m.artist.clone()
             },
-            value: if m.has_progress { clock(m.position) } else { String::new() },
+            value: if m.has_progress {
+                format!("{} / {}", clock(m.position), clock(m.length))
+            } else {
+                "Live".into()
+            },
             bar: Some(if m.has_progress { m.progress } else { 0.0 }),
-            note: if m.has_progress { clock(m.length) } else { "live".into() },
+            note: if m.playing { "Playing".into() } else { "Paused".into() },
         }],
         // No length published (a stream, most browser tabs) means no honest progress
         // to draw — the bare track says "playing, length unknown".
@@ -461,6 +468,9 @@ fn apply(
     if shown.get() == state {
         return;
     }
+    // Only the ring count changes the window's length along its edge; hover changes
+    // depth alone, which the edge anchor absorbs.
+    let relength = shown.get().0 != state.0;
     shown.set(state);
 
     if rings.is_empty() {
@@ -472,7 +482,12 @@ fn apply(
     area.set_size_request(l.w as i32, l.h as i32);
     win.resize(l.w as i32, l.h as i32);
     win.show();
-    surface.place(win, edge, offset);
+    if relength {
+        // Re-anchoring reads the window's size back, and right after a resize that
+        // read can still be the old one. Doing it on hover as well was what made the
+        // rail slide up and down as the pointer crossed the rings.
+        surface.place(win, edge, offset);
+    }
     input_region(win, &l);
     area.queue_draw();
 }

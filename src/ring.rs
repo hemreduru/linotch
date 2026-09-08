@@ -47,8 +47,11 @@ pub struct Row {
 
 #[derive(Clone, Debug)]
 pub struct Ring {
-    /// Card heading ("Claude", "Spotify").
+    /// Card heading ("Claude Usage", "Spotify").
     pub label: String,
+    /// The line under the ring on the rail — a percentage, or a track position.
+    /// Empty draws nothing.
+    pub percent: String,
     pub rows: Vec<Row>,
     /// Shown under the heading when there is something to explain rather than
     /// measure — signed out, rate limited, a reading gone stale.
@@ -72,6 +75,7 @@ impl Ring {
     pub fn usage(label: &str, asset: &'static str, color: (f64, f64, f64)) -> Self {
         Ring {
             label: label.into(),
+            percent: String::new(),
             rows: Vec::new(),
             note: String::new(),
             fraction: 0.0,
@@ -79,25 +83,6 @@ impl Ring {
             health: Health::Idle,
             neutral: false,
             action: None,
-        }
-    }
-
-    /// Ring colour. Usage grades with load so a glance is enough; media stays blue.
-    pub fn color(&self) -> (f64, f64, f64) {
-        self.color_for(self.fraction)
-    }
-
-    /// The colour a given fraction earns on this ring. Each card row grades on its
-    /// own number — one window at 18% next to one at 71% should not share a colour
-    /// just because they share a provider.
-    pub fn color_for(&self, fraction: f64) -> (f64, f64, f64) {
-        if self.neutral {
-            return (0.376, 0.647, 0.980); // #60a5fa
-        }
-        match fraction {
-            f if f >= 0.85 => (0.973, 0.443, 0.443), // #f87171
-            f if f >= 0.60 => (0.984, 0.749, 0.141), // #fbbf24
-            _ => (0.290, 0.871, 0.502),              // #4ade80
         }
     }
 

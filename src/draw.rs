@@ -1,12 +1,15 @@
 //! Cairo drawing, and the geometry that click handling shares with it.
 //!
-//! [`layout`] is computed once per frame and used for painting, hit testing and the
-//! window's input region, so a ring can never be drawn in one place, clicked in
-//! another, and swallow the pointer in a third.
+//! Every number here is codenotch's, converted from its design frame rather than
+//! re-invented: upstream measured them off a 2000×2000 Figma export and anchored
+//! the scale on one value (the provider ring is 44pt across and 117px in the
+//! frame), so [`px`] reproduces the same proportions. The palette is likewise
+//! upstream's sampled values, not approximations of them.
 //!
-//! The rail — the pill with the rings — is centred in the window along the free
-//! axis. That matters: the window grows when a card opens, and centring is what
-//! keeps the rings from sliding across the screen as it does.
+//! The one thing deliberately *not* copied is the window model. codenotch draws
+//! the card in a second window; linotch has one surface, and the card lives inside
+//! it. That is why the window's size along the rail is computed without reference
+//! to which ring is hovered — see [`layout`].
 
 use crate::icons;
 use crate::ring::{Glyph, Ring};
@@ -14,43 +17,98 @@ use crate::surface::Edge;
 use gtk::pango;
 use std::f64::consts::PI;
 
-const RAIL: f64 = 56.0; // thickness of the pill
-const RING_D: f64 = 36.0;
-const STROKE: f64 = 3.5;
-const GAP: f64 = 14.0;
-const PAD: f64 = 10.0;
-const PILL_R: f64 = 18.0;
+/// Points per pixel of codenotch's design frame: the ring is 44pt across and
+/// measures 117px there.
+const SCALE: f64 = 44.0 / 117.0;
 
-const CARD_W: f64 = 284.0;
-const CARD_GAP: f64 = 10.0;
-const CARD_R: f64 = 14.0;
-const CARD_PAD: f64 = 14.0;
-const ROW_H: f64 = 36.0;
-const HEAD_H: f64 = 30.0;
+/// A distance measured in design-frame pixels.
+const fn px(frame_px: f64) -> f64 {
+    frame_px * SCALE
+}
 
-// One palette, so a colour is never invented halfway down the file.
-const BG_RGB: (f64, f64, f64) = (0.043, 0.043, 0.051);
-const DEFAULT_OPACITY: f64 = 0.74;
-const HAIRLINE: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.15);
-const TRACK: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.13);
-const INK: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.95);
-const INK_DIM: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.44);
-const DIVIDER: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.07);
+/// Cap-height fraction of an em, used by upstream to turn a measured cap height
+/// back into a point size.
+const CAP_RATIO: f64 = 0.714;
+const fn font_px(cap_px: f64) -> f64 {
+    px(cap_px) / CAP_RATIO
+}
 
-/// Panel opacity, set once from the environment. A single read point rather than a
-/// parameter threaded through every drawing function, because nothing changes it
-/// after startup.
+// ---- notch body -------------------------------------------------------------
+const RAIL_DEPTH: f64 = px(186.0);
+const CURL: f64 = px(103.0); // the inverse flare back out to the bezel
+const CORNER: f64 = px(78.8);
+const PAD_LEAD: f64 = px(69.5); // body start -> first ring
+const PAD_TRAIL: f64 = px(50.1); // last label -> body end
+const CELL_SPACING: f64 = px(83.5); // label bottom -> next ring top
+
+// ---- ring -------------------------------------------------------------------
+const RING_D: f64 = px(117.0);
+const TRACK_STROKE: f64 = px(15.5);
+const PROGRESS_STROKE: f64 = px(8.0);
+const GLYPH: f64 = px(46.0);
+const RING_LABEL_GAP: f64 = px(26.9);
+
+// ---- card -------------------------------------------------------------------
+const CARD_W: f64 = px(600.0);
+const CARD_CORNER: f64 = px(49.5);
+const CARD_PAD: f64 = px(32.0);
+const TAIL_LEN: f64 = px(75.0);
+const TAIL_H: f64 = px(87.0);
+const TAIL_GAP: f64 = px(28.0); // tail tip -> notch body edge
+const BAR_H: f64 = px(10.5);
+const HEADER_GAP: f64 = px(17.0); // mark -> title
+const HEADER_TO_BLOCK: f64 = px(21.0);
+const LABEL_TO_BAR: f64 = px(16.8);
+const BAR_TO_USED: f64 = px(17.8);
+const BLOCK_SPACING: f64 = px(20.0);
+
+// ---- type -------------------------------------------------------------------
+const FONT_PERCENT: f64 = font_px(27.0);
+const FONT_TITLE: f64 = font_px(26.0);
+const FONT_BODY: f64 = font_px(18.0);
+
+/// Upstream sampled these off the design frame; they are not the hexes in its
+/// written spec, and the frame won.
+const NOTCH_RGB: (f64, f64, f64) = (0.0, 0.0, 0.0);
+const RING_TRACK: (f64, f64, f64, f64) = (0.188, 0.188, 0.188, 1.0); // #303030
+const BAR_TRACK: (f64, f64, f64, f64) = (0.176, 0.176, 0.176, 1.0); // #2d2d2d
+const AMPLE: (f64, f64, f64) = (0.0, 1.0, 0.533); // #00ff88
+const WATCH: (f64, f64, f64) = (0.949, 1.0, 0.0); // #f2ff00
+const CRITICAL: (f64, f64, f64) = (1.0, 0.247, 0.0); // #ff3f00
+const NEUTRAL: (f64, f64, f64) = (1.0, 1.0, 1.0); // media: outside the usage scale
+const TEXT: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 1.0);
+const TEXT_SECONDARY: (f64, f64, f64, f64) = (0.502, 0.502, 0.502, 1.0); // #808080
+
+/// codenotch's bands: under half is ample, then watch, then critical.
+pub fn band(fraction: f64, neutral: bool) -> (f64, f64, f64) {
+    if neutral {
+        return NEUTRAL;
+    }
+    match fraction {
+        f if f < 0.50 => AMPLE,
+        f if f < 0.70 => WATCH,
+        _ => CRITICAL,
+    }
+}
+
+/// Panel opacity, set once from the environment. Upstream's notch is solid black;
+/// this is the one knob that departs from it, and it defaults to matching.
 static OPACITY: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
 
-/// Clamped, not free: below about 0.35 the text stops being readable over a light
-/// window, and a notch nobody can read is not a notch.
 pub fn set_opacity(v: f64) {
     let _ = OPACITY.set(v.clamp(0.35, 1.0));
 }
 
-fn bg() -> (f64, f64, f64, f64) {
-    let (r, g, b) = BG_RGB;
-    (r, g, b, *OPACITY.get().unwrap_or(&DEFAULT_OPACITY))
+fn body_fill() -> (f64, f64, f64, f64) {
+    let (r, g, b) = NOTCH_RGB;
+    (r, g, b, *OPACITY.get().unwrap_or(&1.0))
+}
+
+/// Rough line box for a font size. Upstream measures this from the real font; a
+/// fixed ratio is close enough here and keeps [`layout`] callable without a font
+/// map, which the geometry tests need.
+fn line(size: f64) -> f64 {
+    (size * 1.32).round()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,133 +130,251 @@ pub struct Layout {
     pub h: f64,
     /// Ring centres, in the same order as the rings that produced them.
     pub centers: Vec<(f64, f64)>,
-    pub r: f64,
-    /// The pill.
+    /// The notch body.
     pub rail: Rect,
     /// The open card, when one ring is hovered.
     pub card: Option<Rect>,
+    /// Tail tip, pointing at the hovered ring.
+    pub tail: Option<(f64, f64)>,
+}
+
+/// One cell: ring, gap, percent label.
+fn cell_extent() -> f64 {
+    RING_D + RING_LABEL_GAP + line(FONT_PERCENT)
+}
+
+fn rail_run(n: usize) -> f64 {
+    let n = n.max(1) as f64;
+    2.0 * CURL + PAD_LEAD + n * cell_extent() + (n - 1.0) * CELL_SPACING + PAD_TRAIL
 }
 
 fn card_height(ring: &Ring) -> f64 {
-    let note = if ring.note.is_empty() { 0.0 } else { 17.0 };
-    CARD_PAD * 2.0 + HEAD_H + note + ring.rows.len() as f64 * ROW_H
+    let block = line(FONT_BODY) + LABEL_TO_BAR + BAR_H + BAR_TO_USED + line(FONT_BODY);
+    let rows = ring.rows.len() as f64;
+    let blocks = if ring.rows.is_empty() {
+        0.0
+    } else {
+        rows * block + (rows - 1.0) * BLOCK_SPACING
+    };
+    let note = if ring.note.is_empty() {
+        0.0
+    } else {
+        HEADER_TO_BLOCK + line(FONT_BODY)
+    };
+    let body = if blocks > 0.0 { HEADER_TO_BLOCK + blocks } else { 0.0 };
+    2.0 * CARD_PAD + line(FONT_TITLE) + note + body
 }
 
-/// `hover` is the ring the pointer is over, which is what opens a card.
+/// `hover` decides whether a card is drawn and where it points — but **not** how
+/// long the window is.
+///
+/// That is the whole trick behind the rail staying still. The window is anchored
+/// by its centre along the edge, so any change in its length moves the rail by
+/// half of it; sizing the window to the hovered card made the rail jump every time
+/// the pointer crossed a ring. The length is therefore computed from the tallest
+/// card *any* ring could open, hovered or not, and only the depth changes.
 pub fn layout(rings: &[Ring], edge: Edge, hover: Option<usize>) -> Layout {
-    let n = rings.len().max(1) as f64;
-    let rail_run = n * RING_D + (n - 1.0) * GAP + 2.0 * PAD;
-    let card_h = hover.and_then(|i| rings.get(i)).map(card_height);
-    let card_run = card_h.unwrap_or(0.0);
-    let grow = if card_h.is_some() { CARD_W + CARD_GAP } else { 0.0 };
+    let run = rail_run(rings.len()).max(
+        rings
+            .iter()
+            .map(card_height)
+            .fold(0.0_f64, f64::max),
+    );
+    let open = hover.and_then(|i| rings.get(i)).is_some();
+    let depth = RAIL_DEPTH + if open { CARD_W + TAIL_LEN + TAIL_GAP } else { 0.0 };
 
-    let (w, h, rail, card_origin) = if edge.vertical() {
-        // Rail hugs left or right; the card opens inward beside it.
-        let h = rail_run.max(card_run);
-        let w = RAIL + grow;
-        let rail_x = if edge == Edge::Right { w - RAIL } else { 0.0 };
-        let card_x = if edge == Edge::Right { 0.0 } else { RAIL + CARD_GAP };
-        (
-            w,
-            h,
-            Rect { x: rail_x, y: (h - rail_run) / 2.0, w: RAIL, h: rail_run },
-            (card_x, 0.0),
-        )
-    } else {
-        let w = rail_run.max(CARD_W);
-        let h = RAIL + if card_h.is_some() { CARD_GAP + card_run } else { 0.0 };
-        let rail_y = if edge == Edge::Bottom { h - RAIL } else { 0.0 };
-        let card_y = if edge == Edge::Bottom { 0.0 } else { RAIL + CARD_GAP };
-        (
-            w,
-            h,
-            Rect { x: (w - rail_run) / 2.0, y: rail_y, w: rail_run, h: RAIL },
-            (0.0, card_y),
-        )
+    let (w, h) = if edge.vertical() { (depth, run) } else { (run, depth) };
+    let rail = match edge {
+        Edge::Right => Rect { x: w - RAIL_DEPTH, y: 0.0, w: RAIL_DEPTH, h },
+        Edge::Left => Rect { x: 0.0, y: 0.0, w: RAIL_DEPTH, h },
+        Edge::Bottom => Rect { x: 0.0, y: h - RAIL_DEPTH, w, h: RAIL_DEPTH },
+        Edge::Top => Rect { x: 0.0, y: 0.0, w, h: RAIL_DEPTH },
     };
 
+    // Cells run along the body, which starts one curl in from each end.
+    let start = CURL + PAD_LEAD;
     let centers = (0..rings.len().max(1))
         .map(|i| {
-            let along = PAD + RING_D / 2.0 + i as f64 * (RING_D + GAP);
-            if edge.vertical() {
-                (rail.x + RAIL / 2.0, rail.y + along)
-            } else {
-                (rail.x + along, rail.y + RAIL / 2.0)
+            let along = start + RING_D / 2.0 + i as f64 * (cell_extent() + CELL_SPACING);
+            match edge {
+                Edge::Right | Edge::Left => (rail.x + RAIL_DEPTH / 2.0, along),
+                _ => (along, rail.y + RAIL_DEPTH / 2.0),
             }
         })
         .collect::<Vec<_>>();
 
-    // The card lines up with the ring that opened it, then is pulled back inside
-    // the window — a card hanging off the top edge would simply be clipped away.
-    let card = card_h.map(|ch| {
-        let (cx, cy) = centers[hover.unwrap_or(0).min(centers.len() - 1)];
-        if edge.vertical() {
-            Rect { x: card_origin.0, y: (cy - ch / 2.0).clamp(0.0, (h - ch).max(0.0)), w: CARD_W, h: ch }
-        } else {
-            Rect { x: (cx - CARD_W / 2.0).clamp(0.0, (w - CARD_W).max(0.0)), y: card_origin.1, w: CARD_W, h: ch }
+    let (card, tail) = match hover.and_then(|i| rings.get(i).map(|r| (i, r))) {
+        None => (None, None),
+        Some((i, ring)) => {
+            let ch = card_height(ring);
+            let (cx, cy) = centers[i];
+            let (card, tip) = match edge {
+                Edge::Right => (
+                    Rect { x: 0.0, y: (cy - ch / 2.0).clamp(0.0, (h - ch).max(0.0)), w: CARD_W, h: ch },
+                    (rail.x - TAIL_GAP, cy),
+                ),
+                Edge::Left => (
+                    Rect {
+                        x: w - CARD_W,
+                        y: (cy - ch / 2.0).clamp(0.0, (h - ch).max(0.0)),
+                        w: CARD_W,
+                        h: ch,
+                    },
+                    (rail.x + RAIL_DEPTH + TAIL_GAP, cy),
+                ),
+                Edge::Bottom => (
+                    Rect { x: (cx - CARD_W / 2.0).clamp(0.0, (w - CARD_W).max(0.0)), y: 0.0, w: CARD_W, h: ch },
+                    (cx, rail.y - TAIL_GAP),
+                ),
+                Edge::Top => (
+                    Rect {
+                        x: (cx - CARD_W / 2.0).clamp(0.0, (w - CARD_W).max(0.0)),
+                        y: h - ch,
+                        w: CARD_W,
+                        h: ch,
+                    },
+                    (cx, rail.y + RAIL_DEPTH + TAIL_GAP),
+                ),
+            };
+            (Some(card), Some(tip))
         }
-    });
+    };
 
-    Layout { w, h, centers, r: (RING_D - STROKE) / 2.0, rail, card }
+    Layout { w, h, centers, rail, card, tail }
 }
 
 /// Which ring contains the point, if any. The target is the whole cell, not the
-/// stroke: a 3.5 px ring is not something anyone can click on purpose.
+/// stroke: a 3 pt arc is not something anyone can click on purpose.
 pub fn hit(l: &Layout, x: f64, y: f64) -> Option<usize> {
+    let reach = (cell_extent() + CELL_SPACING) / 2.0;
     l.centers.iter().position(|(cx, cy)| {
-        let (dx, dy) = (x - cx, y - cy);
-        (dx * dx + dy * dy).sqrt() <= RING_D / 2.0 + GAP / 2.0
+        let (dx, dy) = ((x - cx).abs(), (y - cy).abs());
+        dx <= RAIL_DEPTH / 2.0 && dy <= reach || dy <= RAIL_DEPTH / 2.0 && dx <= reach
     })
 }
 
 // ------------------------------------------------------------------- shapes
 
-fn rounded(cr: &cairo::Context, rect: Rect, corners: (f64, f64, f64, f64)) {
-    let Rect { x, y, w, h } = rect;
-    let (tl, tr, br, bl) = corners;
-    cr.new_path();
-    cr.new_sub_path();
-    cr.arc(x + w - tr, y + tr, tr, -PI / 2.0, 0.0);
-    cr.arc(x + w - br, y + h - br, br, 0.0, PI / 2.0);
-    cr.arc(x + bl, y + h - bl, bl, PI / 2.0, PI);
-    cr.arc(x + tl, y + tl, tl, PI, 1.5 * PI);
-    cr.close_path();
-}
-
 fn rgba(cr: &cairo::Context, c: (f64, f64, f64, f64)) {
     cr.set_source_rgba(c.0, c.1, c.2, c.3);
 }
 
-/// Panel with a hairline edge — the hairline is most of what separates "a dark
-/// rectangle" from "a surface".
-fn panel(cr: &cairo::Context, rect: Rect, corners: (f64, f64, f64, f64)) {
-    rounded(cr, rect, corners);
-    rgba(cr, bg());
-    let _ = cr.fill_preserve();
-    // A short fall of light from the top edge. Flat fill plus hairline reads as a
-    // rectangle; this reads as a surface with a direction to it.
-    let g = cairo::LinearGradient::new(rect.x, rect.y, rect.x, rect.y + rect.h.min(90.0));
-    g.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.055);
-    g.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0);
-    let _ = cr.set_source(&g);
-    let _ = cr.fill_preserve();
-    rgba(cr, HAIRLINE);
-    cr.set_line_width(1.0);
-    let _ = cr.stroke();
+/// The notch body: a pill welded to one edge, with *inverse* rounded corners at
+/// each end that flare back out to the bezel, so it reads as part of the edge
+/// rather than a panel floating near it.
+///
+/// Written once for the right edge in a canonical space where the bezel is at
+/// `maxX`, then transformed — the corner-versus-flare clamping below is the part
+/// that took care, and four hand-written copies would mean three that are never
+/// the one under the cursor when it breaks.
+fn notch_path(cr: &cairo::Context, rail: Rect, edge: Edge) {
+    let (depth, length) = if edge.vertical() {
+        (rail.w, rail.h)
+    } else {
+        (rail.h, rail.w)
+    };
+
+    // Order matters. Clamping the corner by `depth - curl` collapses it to zero as
+    // soon as the flare is as wide as the body; the corner is claimed first, out of
+    // half the depth, and the flare takes what is left.
+    let wanted = CORNER.min(depth / 2.0).max(0.0);
+    let curl = CURL.min(length / 2.0).min(depth - wanted).max(0.0);
+    let corner = wanted.min((length - 2.0 * curl) / 2.0).max(0.0);
+    let (top, bottom) = (curl, length - curl);
+
+    let _ = cr.save();
+    cr.translate(rail.x, rail.y);
+    // Canonical (u across from the far side, v along) onto this edge, bezel right.
+    match edge {
+        Edge::Right => {}
+        Edge::Left => cr.transform(cairo::Matrix::new(-1.0, 0.0, 0.0, 1.0, depth, 0.0)),
+        Edge::Top => cr.transform(cairo::Matrix::new(0.0, -1.0, 1.0, 0.0, 0.0, depth)),
+        // A quarter turn the other way, not a mirror: (u,v) -> (length - v, u).
+        Edge::Bottom => cr.transform(cairo::Matrix::new(0.0, 1.0, -1.0, 0.0, length, 0.0)),
+    }
+
+    // Cairo's y runs down, so SwiftUI's `clockwise: false` (increasing angle) is
+    // plain `arc`, and its `clockwise: true` is `arc_negative`. Getting that pair
+    // backwards sends each corner the long way round the circle, which is exactly
+    // what turned the flares into spikes.
+    cr.new_path();
+    cr.move_to(depth, 0.0);
+    if curl > 0.0 {
+        // Concave: the body pulls away from the bezel rather than rounding into it.
+        cr.arc(depth - curl, 0.0, curl, 0.0, PI / 2.0);
+    }
+    cr.line_to(corner, top);
+    cr.arc_negative(corner, top + corner, corner, 1.5 * PI, PI);
+    cr.line_to(0.0, bottom - corner);
+    cr.arc_negative(corner, bottom - corner, corner, PI, PI / 2.0);
+    cr.line_to(depth - curl, bottom);
+    if curl > 0.0 {
+        cr.arc(depth - curl, length, curl, 1.5 * PI, 2.0 * PI);
+    }
+    cr.close_path();
+    let _ = cr.restore();
 }
 
-/// Rounded progress bar. `frac` of the track is filled in `color`.
+fn rounded(cr: &cairo::Context, rect: Rect, r: f64) {
+    let Rect { x, y, w, h } = rect;
+    let r = r.min(w / 2.0).min(h / 2.0);
+    cr.new_path();
+    cr.new_sub_path();
+    cr.arc(x + w - r, y + r, r, -PI / 2.0, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, PI / 2.0);
+    cr.arc(x + r, y + h - r, r, PI / 2.0, PI);
+    cr.arc(x + r, y + r, r, PI, 1.5 * PI);
+    cr.close_path();
+}
+
+/// Upstream's tail: two cubics from shoulder to tip, so it leaves the card as a
+/// swelling rather than a triangle stuck on the side.
+fn tail_path(cr: &cairo::Context, tip: (f64, f64), edge: Edge) {
+    let (tx, ty) = tip;
+    let (len, half) = (TAIL_LEN, TAIL_H / 2.0);
+    cr.new_path();
+    // Canonical: tip to the right, base a `len` back along the axis.
+    let (a, b, a_sh, a_tp, b_tp, b_sh, t) = if edge.vertical() {
+        let s = if edge == Edge::Right { 1.0 } else { -1.0 };
+        let bx = tx - s * len;
+        (
+            (bx, ty - half),
+            (bx, ty + half),
+            (bx, ty - half * 0.5),
+            (tx - s * len * 0.42, ty - half * 0.24),
+            (tx - s * len * 0.42, ty + half * 0.24),
+            (bx, ty + half * 0.5),
+            (tx, ty),
+        )
+    } else {
+        let s = if edge == Edge::Bottom { 1.0 } else { -1.0 };
+        let by = ty - s * len;
+        (
+            (tx - half, by),
+            (tx + half, by),
+            (tx - half * 0.5, by),
+            (tx - half * 0.24, ty - s * len * 0.42),
+            (tx + half * 0.24, ty - s * len * 0.42),
+            (tx + half * 0.5, by),
+            (tx, ty),
+        )
+    };
+    cr.move_to(a.0, a.1);
+    cr.curve_to(a_sh.0, a_sh.1, a_tp.0, a_tp.1, t.0, t.1);
+    cr.curve_to(b_tp.0, b_tp.1, b_sh.0, b_sh.1, b.0, b.1);
+    cr.close_path();
+}
+
 fn bar(cr: &cairo::Context, x: f64, y: f64, w: f64, frac: f64, color: (f64, f64, f64), alpha: f64) {
-    let h = 5.0;
-    rounded(cr, Rect { x, y, w, h }, (2.5, 2.5, 2.5, 2.5));
-    rgba(cr, TRACK);
+    rounded(cr, Rect { x, y, w, h: BAR_H }, BAR_H / 2.0);
+    rgba(cr, BAR_TRACK);
     let _ = cr.fill();
-    let fw = (w * frac.clamp(0.0, 1.0)).max(if frac > 0.0 { h } else { 0.0 });
-    if fw > 0.0 {
-        rounded(cr, Rect { x, y, w: fw, h }, (2.5, 2.5, 2.5, 2.5));
-        cr.set_source_rgba(color.0, color.1, color.2, alpha);
-        let _ = cr.fill();
-    }
+    // Never thinner than it is tall: a 1% reading should still read as a mark, not
+    // as an empty track.
+    let fw = (w * frac.clamp(0.0, 1.0)).max(BAR_H);
+    rounded(cr, Rect { x, y, w: fw, h: BAR_H }, BAR_H / 2.0);
+    cr.set_source_rgba(color.0, color.1, color.2, alpha);
+    let _ = cr.fill();
 }
 
 // --------------------------------------------------------------------- text
@@ -234,160 +410,143 @@ fn text(
 // --------------------------------------------------------------------- draw
 
 pub fn draw(cr: &cairo::Context, rings: &[Ring], l: &Layout, edge: Edge, hover: Option<usize>) {
-    // The window is an ARGB surface; clear it or the previous frame shows through.
     cr.set_operator(cairo::Operator::Source);
     cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
     let _ = cr.paint();
     cr.set_operator(cairo::Operator::Over);
 
-    if let (Some(rect), Some(ring)) = (l.card, hover.and_then(|i| rings.get(i))) {
+    if let (Some(rect), Some(tip), Some(ring)) = (l.card, l.tail, hover.and_then(|i| rings.get(i))) {
+        // Tail and card are one filled shape, so no seam shows between them.
+        tail_path(cr, tip, edge);
+        rgba(cr, body_fill());
+        let _ = cr.fill();
+        rounded(cr, rect, CARD_CORNER);
+        rgba(cr, body_fill());
+        let _ = cr.fill();
         card(cr, rect, ring);
     }
 
-    // Pill: the screen-facing edge stays square, so the notch reads as growing out
-    // of the bezel rather than floating near it.
-    let sq = 0.0;
-    let corners = match edge {
-        Edge::Right => (PILL_R, sq, sq, PILL_R),
-        Edge::Left => (sq, PILL_R, PILL_R, sq),
-        Edge::Top => (sq, sq, PILL_R, PILL_R),
-        Edge::Bottom => (PILL_R, PILL_R, sq, sq),
-    };
-    panel(cr, l.rail, corners);
+    notch_path(cr, l.rail, edge);
+    rgba(cr, body_fill());
+    let _ = cr.fill();
 
-    for (i, (ring, &(cx, cy))) in rings.iter().zip(l.centers.iter()).enumerate() {
-        ring_at(cr, ring, cx, cy, l.r, hover == Some(i));
+    for (ring, &(cx, cy)) in rings.iter().zip(l.centers.iter()) {
+        ring_at(cr, ring, cx, cy);
     }
 }
 
-fn ring_at(cr: &cairo::Context, ring: &Ring, cx: f64, cy: f64, r: f64, hot: bool) {
+fn ring_at(cr: &cairo::Context, ring: &Ring, cx: f64, cy: f64) {
     let a = ring.alpha();
-    let (cr_, cg, cb) = ring.color();
-    cr.set_line_cap(cairo::LineCap::Round);
-
-    if hot {
-        // A halo instead of a size change: growing the ring would move the mark
-        // under the pointer and make the whole rail feel unstable.
-        cr.new_path();
-        cr.set_line_width(1.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.13);
-        cr.arc(cx, cy, r + 6.0, 0.0, 2.0 * PI);
-        let _ = cr.stroke();
-    }
+    // strokeBorder: the track sits inside the diameter, so both strokes share the
+    // same centre radius and the thin arc rides down the middle of the thick one.
+    let r = (RING_D - TRACK_STROKE) / 2.0;
 
     cr.new_path();
-    cr.set_line_width(STROKE);
-    rgba(cr, TRACK);
+    cr.set_line_width(TRACK_STROKE);
+    cr.set_line_cap(cairo::LineCap::Butt);
+    cr.set_source_rgba(RING_TRACK.0, RING_TRACK.1, RING_TRACK.2, RING_TRACK.3 * a);
     cr.arc(cx, cy, r, 0.0, 2.0 * PI);
     let _ = cr.stroke();
 
     if ring.fraction > 0.0 {
-        let start = -PI / 2.0;
-        let end = start + 2.0 * PI * ring.fraction.clamp(0.0, 1.0);
-        // Soft bloom under the arc — the one thing that stops the ring reading as
-        // a flat stroke on a flat panel.
+        let (cr_, cg, cb) = band(ring.fraction, ring.neutral);
         cr.new_path();
-        cr.set_line_width(STROKE + 5.0);
-        cr.set_source_rgba(cr_, cg, cb, 0.16 * a);
-        cr.arc(cx, cy, r, start, end);
-        let _ = cr.stroke();
-
-        cr.new_path();
-        cr.set_line_width(STROKE);
+        cr.set_line_width(PROGRESS_STROKE);
+        cr.set_line_cap(cairo::LineCap::Round);
         cr.set_source_rgba(cr_, cg, cb, a);
-        cr.arc(cx, cy, r, start, end);
+        let start = -PI / 2.0;
+        cr.arc(cx, cy, r, start, start + 2.0 * PI * ring.fraction.clamp(0.0, 1.0));
         let _ = cr.stroke();
     }
 
     cr.new_path();
     match &ring.glyph {
-        Glyph::Brand { asset, color } => {
-            icons::brand(cr, asset, cx, cy, 17.0, (color.0, color.1, color.2, a));
+        Glyph::Brand { asset, .. } => {
+            // Upstream draws every mark in textPrimary, not in brand colour.
+            icons::brand(cr, asset, cx, cy, GLYPH, (1.0, 1.0, 1.0, a));
         }
         Glyph::Player { desktop_entry, playing } => {
-            // At rest: whose player this is. Under the pointer: what a click does.
-            if hot || !icons::app(cr, desktop_entry, cx, cy, 20) {
+            if !icons::app(cr, desktop_entry, cx, cy, GLYPH as i32) {
                 transport(cr, cx, cy, *playing, a);
             }
         }
+    }
+
+    if !ring.percent.is_empty() {
+        let w = RING_D * 2.0;
+        text(
+            cr,
+            cx - w / 2.0,
+            cy + RING_D / 2.0 + RING_LABEL_GAP,
+            w,
+            &ring.percent,
+            FONT_PERCENT,
+            pango::Weight::Semibold,
+            (TEXT.0, TEXT.1, TEXT.2, TEXT.3 * a),
+            pango::Alignment::Center,
+        );
     }
 }
 
 fn transport(cr: &cairo::Context, cx: f64, cy: f64, playing: bool, alpha: f64) {
     cr.new_path();
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.92 * alpha);
+    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
+    let s = GLYPH / 2.0;
     if playing {
-        let (w, h) = (3.0, 11.0);
-        cr.rectangle(cx - 5.0, cy - h / 2.0, w, h);
-        cr.rectangle(cx + 2.0, cy - h / 2.0, w, h);
+        let (w, h) = (s * 0.34, s * 1.25);
+        cr.rectangle(cx - s * 0.58, cy - h / 2.0, w, h);
+        cr.rectangle(cx + s * 0.24, cy - h / 2.0, w, h);
     } else {
         // Nudged right: a triangle's visual centre sits left of its bounding box.
-        let s = 5.5;
-        cr.move_to(cx - s * 0.6, cy - s);
-        cr.line_to(cx + s, cy);
-        cr.line_to(cx - s * 0.6, cy + s);
+        cr.move_to(cx - s * 0.55, cy - s * 0.72);
+        cr.line_to(cx + s * 0.78, cy);
+        cr.line_to(cx - s * 0.55, cy + s * 0.72);
         cr.close_path();
     }
     let _ = cr.fill();
 }
 
 fn card(cr: &cairo::Context, rect: Rect, ring: &Ring) {
-    panel(cr, rect, (CARD_R, CARD_R, CARD_R, CARD_R));
-
     let x = rect.x + CARD_PAD;
     let w = rect.w - CARD_PAD * 2.0;
     let mut y = rect.y + CARD_PAD;
 
-    // Heading: mark, then name, then the headline number on the right.
     match &ring.glyph {
-        Glyph::Brand { asset, color } => {
-            icons::brand(cr, asset, x + 8.0, y + 8.0, 16.0, (color.0, color.1, color.2, 1.0));
+        Glyph::Brand { asset, .. } => {
+            icons::brand(cr, asset, x + GLYPH / 2.0, y + line(FONT_TITLE) / 2.0, GLYPH, TEXT);
         }
         Glyph::Player { desktop_entry, playing } => {
-            if !icons::app(cr, desktop_entry, x + 8.0, y + 8.0, 16) {
-                transport(cr, x + 8.0, y + 8.0, *playing, 1.0);
+            let (gx, gy) = (x + GLYPH / 2.0, y + line(FONT_TITLE) / 2.0);
+            if !icons::app(cr, desktop_entry, gx, gy, GLYPH as i32) {
+                transport(cr, gx, gy, *playing, 1.0);
             }
         }
     }
-    text(cr, x + 24.0, y - 2.0, w - 24.0, &ring.label, 13.0, pango::Weight::Bold, INK, pango::Alignment::Left);
-    y += HEAD_H - 8.0;
-
-    // Hairline under the heading: it is what makes the rows read as a list rather
-    // than as text that happens to be below a title.
-    cr.new_path();
-    cr.set_line_width(1.0);
-    rgba(cr, DIVIDER);
-    cr.move_to(x, y.round() + 0.5);
-    cr.line_to(x + w, y.round() + 0.5);
-    let _ = cr.stroke();
-    y += 8.0;
+    let tx = x + GLYPH + HEADER_GAP;
+    text(cr, tx, y, rect.w - CARD_PAD - tx + rect.x, &ring.label, FONT_TITLE, pango::Weight::Semibold, TEXT, pango::Alignment::Left);
+    y += line(FONT_TITLE);
 
     if !ring.note.is_empty() {
-        text(cr, x, y - 2.0, w, &ring.note, 11.0, pango::Weight::Normal, INK_DIM, pango::Alignment::Left);
-        y += 17.0;
+        y += HEADER_TO_BLOCK;
+        text(cr, x, y, w, &ring.note, FONT_BODY, pango::Weight::Normal, TEXT_SECONDARY, pango::Alignment::Left);
+        y += line(FONT_BODY);
     }
 
-    for row in &ring.rows {
-        text(cr, x, y + 1.0, w * 0.6, &row.label, 11.5, pango::Weight::Normal, INK_DIM, pango::Alignment::Left);
-        text(cr, x, y, w, &row.value, 13.0, pango::Weight::Bold, INK, pango::Alignment::Right);
-        if let Some(f) = row.bar {
-            let bw = if row.note.is_empty() { w } else { w * 0.62 };
-            bar(cr, x, y + 22.0, bw, f, ring.color_for(f), ring.alpha());
-            if !row.note.is_empty() {
-                text(
-                    cr,
-                    x + bw + 8.0,
-                    y + 17.0,
-                    w - bw - 8.0,
-                    &row.note,
-                    10.5,
-                    pango::Weight::Normal,
-                    INK_DIM,
-                    pango::Alignment::Right,
-                );
-            }
+    for (i, row) in ring.rows.iter().enumerate() {
+        y += if i == 0 { HEADER_TO_BLOCK } else { BLOCK_SPACING };
+        // label left, reset right, on one line
+        text(cr, x, y, w * 0.62, &row.label, FONT_BODY, pango::Weight::Normal, TEXT, pango::Alignment::Left);
+        if !row.note.is_empty() {
+            text(cr, x, y, w, &row.note, FONT_BODY, pango::Weight::Normal, TEXT_SECONDARY, pango::Alignment::Right);
         }
-        y += ROW_H;
+        y += line(FONT_BODY);
+        if let Some(f) = row.bar {
+            y += LABEL_TO_BAR;
+            bar(cr, x, y, w, f, band(f, ring.neutral), ring.alpha());
+            y += BAR_H + BAR_TO_USED;
+        }
+        text(cr, x, y, w, &row.value, FONT_BODY, pango::Weight::Normal, TEXT, pango::Alignment::Left);
+        y += line(FONT_BODY);
     }
 }
 
@@ -399,12 +558,13 @@ mod tests {
     fn ring(rows: usize) -> Ring {
         let mut r = Ring::usage("Test", "claude", (1.0, 1.0, 1.0));
         r.health = Health::Ok;
+        r.percent = "42%".into();
         r.rows = (0..rows)
             .map(|i| Row {
                 label: format!("w{i}"),
-                value: "50%".into(),
+                value: "50% Used".into(),
                 bar: Some(0.5),
-                note: "resets in 1h".into(),
+                note: "Resets in 1h".into(),
             })
             .collect();
         r
@@ -418,108 +578,142 @@ mod tests {
                 let l = layout(&rings, edge, hover);
                 for (i, &(x, y)) in l.centers.iter().enumerate() {
                     assert_eq!(hit(&l, x, y), Some(i), "{edge:?} hover={hover:?} ring {i}");
-                    assert!(l.rail.contains(x, y), "{edge:?} ring {i} not on the pill");
+                    assert!(l.rail.contains(x, y), "{edge:?} ring {i} not on the body");
                 }
             }
         }
     }
 
-    /// The rail must not move when a card opens, or the rings slide out from under
-    /// the pointer that opened them.
+    /// The regression that mattered: the window is centred on its edge, so any
+    /// change in its length along that edge moves the rail by half of it. Opening
+    /// a card must not change that length — only the depth.
     #[test]
-    fn opening_a_card_leaves_the_rings_where_they_were() {
-        let rings: Vec<Ring> = (0..3).map(|_| ring(3)).collect();
-        for edge in [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom] {
-            let shut = layout(&rings, edge, None);
-            let open = layout(&rings, edge, Some(1));
-            for (i, (&(ax, ay), &(bx, by))) in
-                shut.centers.iter().zip(open.centers.iter()).enumerate()
-            {
-                // Positions are window-relative; the window itself is re-anchored by
-                // the same deltas, so what must match is the offset from the rail.
-                let (dax, day) = (ax - shut.rail.x, ay - shut.rail.y);
-                let (dbx, dby) = (bx - open.rail.x, by - open.rail.y);
-                assert_eq!((dax, day), (dbx, dby), "{edge:?} ring {i} moved in the rail");
+    fn opening_a_card_never_changes_the_length_along_the_edge() {
+        for count in 1..=4 {
+            let rings: Vec<Ring> = (0..count).map(|i| ring(i % 3 + 1)).collect();
+            for edge in [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom] {
+                let shut = layout(&rings, edge, None);
+                for hover in 0..rings.len() {
+                    let open = layout(&rings, edge, Some(hover));
+                    let (a, b) = if edge.vertical() {
+                        (shut.h, open.h)
+                    } else {
+                        (shut.w, open.w)
+                    };
+                    assert_eq!(a, b, "{edge:?} n={count} hover={hover}: length changed");
+                    // Only the along-axis is checked: the window is anchored to its
+                    // edge, so growth in depth pushes the far side away and leaves
+                    // the rail where it was on screen.
+                    let along = |c: &(f64, f64)| if edge.vertical() { c.1 } else { c.0 };
+                    let before: Vec<f64> = shut.centers.iter().map(along).collect();
+                    let after: Vec<f64> = open.centers.iter().map(along).collect();
+                    assert_eq!(
+                        before, after,
+                        "{edge:?} n={count} hover={hover}: rings moved along the edge"
+                    );
+                }
             }
         }
     }
 
     #[test]
-    fn the_card_stays_inside_the_window() {
-        let rings: Vec<Ring> = (0..2).map(|_| ring(3)).collect();
+    fn the_card_and_its_tail_stay_inside_the_window() {
+        let rings: Vec<Ring> = (0..3).map(|_| ring(3)).collect();
         for edge in [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom] {
             for hover in 0..rings.len() {
                 let l = layout(&rings, edge, Some(hover));
                 let c = l.card.expect("hover opens a card");
+                let (tx, ty) = l.tail.expect("hover places a tail");
                 assert!(c.x >= 0.0 && c.y >= 0.0, "{edge:?} card off the top/left");
-                assert!(c.x + c.w <= l.w + 0.01 && c.y + c.h <= l.h + 0.01, "{edge:?} card overflows");
                 assert!(
-                    !l.rail.contains(-1.0, -1.0) && !c.contains(-1.0, -1.0),
-                    "{edge:?} outside must stay click-through"
+                    c.x + c.w <= l.w + 0.01 && c.y + c.h <= l.h + 0.01,
+                    "{edge:?} card overflows"
+                );
+                assert!(
+                    tx >= 0.0 && tx <= l.w && ty >= 0.0 && ty <= l.h,
+                    "{edge:?} tail tip outside the window"
                 );
             }
         }
     }
+
+    /// Bands are upstream's, and the boundaries are the part worth pinning.
+    #[test]
+    fn bands_match_upstream() {
+        assert_eq!(band(0.0, false), AMPLE);
+        assert_eq!(band(0.499, false), AMPLE);
+        assert_eq!(band(0.5, false), WATCH);
+        assert_eq!(band(0.699, false), WATCH);
+        assert_eq!(band(0.7, false), CRITICAL);
+        assert_eq!(band(1.5, false), CRITICAL);
+        assert_eq!(band(0.9, true), NEUTRAL);
+    }
 }
 
-/// Renders the notch to a PNG with representative data, both shut and with a card
-/// open. Not part of the default run — it writes a file and needs a font map:
-/// `cargo test -- --ignored preview`, then look at `/tmp/linotch-preview.png`.
+/// Renders the notch to a PNG with the same readings as upstream's design frame,
+/// so the two can be put side by side. Writes a file and needs a font map, so it
+/// is not part of the default run: `cargo test -- --ignored preview`.
 #[cfg(test)]
 #[test]
 #[ignore]
 fn preview() {
     use crate::ring::{Action, Health, Row};
 
-    fn row(label: &str, pct: f64, note: &str) -> Row {
+    fn provider(name: &str, asset: &'static str, pct: f64, rows: Vec<Row>) -> Ring {
+        let mut r = Ring::usage(&format!("{name} Usage"), asset, (1.0, 1.0, 1.0));
+        r.health = Health::Ok;
+        r.fraction = pct;
+        r.percent = format!("{:.0}%", pct * 100.0);
+        r.rows = rows;
+        r
+    }
+    fn row(label: &str, pct: f64, resets: &str) -> Row {
         Row {
             label: label.into(),
-            value: format!("{:.0}%", pct * 100.0),
+            value: format!("{:.0}% Used", pct * 100.0),
             bar: Some(pct),
-            note: note.into(),
+            note: format!("Resets {resets}"),
         }
     }
-    let mut claude = Ring::usage("Claude", "claude", (0.851, 0.467, 0.341));
-    claude.health = Health::Ok;
-    claude.fraction = 0.42;
-    claude.rows = vec![
-        row("Session", 0.42, "in 2h 14m"),
-        row("Weekly (all)", 0.18, "in 3d 4h"),
+
+    let rings = vec![
+        provider(
+            "Claude",
+            "claude",
+            0.73,
+            vec![
+                row("Current session", 0.73, "in 51 min"),
+                row("All models", 0.07, "Thu 12:00 AM"),
+            ],
+        ),
+        provider("Codex", "openai", 0.21, vec![row("Current session", 0.21, "in 3h 20m")]),
+        Ring {
+            label: "Spotify".into(),
+            percent: "2:14".into(),
+            note: "Bohemian Rhapsody".into(),
+            rows: vec![Row {
+                label: "Queen".into(),
+                value: "2:14 / 5:03".into(),
+                bar: Some(0.44),
+                note: "Playing".into(),
+            }],
+            fraction: 0.44,
+            glyph: Glyph::Player { desktop_entry: "spotify".into(), playing: true },
+            health: Health::Ok,
+            neutral: true,
+            action: Some(Action::PlayPause),
+        },
     ];
-    let mut codex = Ring::usage("Codex", "openai", (1.0, 1.0, 1.0));
-    codex.health = Health::Ok;
-    codex.fraction = 0.71;
-    codex.rows = vec![row("Session", 0.71, "in 48m"), row("Weekly", 0.33, "in 5d")];
-    let media = Ring {
-        label: "Spotify".into(),
-        note: "Bohemian Rhapsody".into(),
-        rows: vec![Row {
-            label: "Queen".into(),
-            value: "2:14".into(),
-            bar: Some(0.37),
-            note: "5:03".into(),
-        }],
-        fraction: 0.37,
-        glyph: Glyph::Player { desktop_entry: "spotify".into(), playing: true },
-        health: Health::Ok,
-        neutral: true,
-        action: Some(Action::PlayPause),
-    };
-    let rings = vec![claude, codex, media];
 
     let shut = layout(&rings, Edge::Right, None);
     let open = layout(&rings, Edge::Right, Some(0));
-    let (pad, gap) = (24.0, 24.0);
+    let (pad, gap) = (26.0, 26.0);
     let w = (pad * 2.0 + shut.w + gap + open.w) as i32;
     let h = (pad * 2.0 + shut.h.max(open.h)) as i32;
 
     let surf = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap();
     let cr = cairo::Context::new(&surf).unwrap();
-
-    for (l, hover, x) in [
-        (&shut, None, pad),
-        (&open, Some(0), pad + shut.w + gap),
-    ] {
+    for (l, hover, x) in [(&shut, None, pad), (&open, Some(0), pad + shut.w + gap)] {
         cr.save().unwrap();
         cr.translate(x, pad);
         cr.rectangle(0.0, 0.0, l.w, l.h);
@@ -527,23 +721,14 @@ fn preview() {
         draw(&cr, &rings, l, Edge::Right, hover);
         cr.restore().unwrap();
     }
-    // draw() clears its own clip first, so the backdrop goes on underneath at the
-    // end rather than being painted first and wiped.
+    // draw() clears its own clip first, so the backdrop goes on underneath.
     cr.set_operator(cairo::Operator::DestOver);
-    // Something with structure behind the panels, or "transparent" and "dark grey"
-    // look identical.
     let g = cairo::LinearGradient::new(0.0, 0.0, w as f64, h as f64);
-    g.add_color_stop_rgb(0.0, 0.16, 0.18, 0.24);
-    g.add_color_stop_rgb(0.5, 0.35, 0.24, 0.30);
-    g.add_color_stop_rgb(1.0, 0.12, 0.20, 0.22);
+    g.add_color_stop_rgb(0.0, 0.16, 0.55, 0.62);
+    g.add_color_stop_rgb(0.5, 0.42, 0.32, 0.22);
+    g.add_color_stop_rgb(1.0, 0.10, 0.38, 0.45);
     cr.set_source(&g).unwrap();
     cr.paint().unwrap();
-    for i in 0..7 {
-        let x = 30.0 + i as f64 * 62.0;
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.05);
-        cr.rectangle(x, 20.0 + (i % 3) as f64 * 40.0, 44.0, 120.0);
-        cr.fill().unwrap();
-    }
     drop(cr);
 
     let mut f = std::fs::File::create("/tmp/linotch-preview.png").unwrap();

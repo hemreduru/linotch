@@ -23,9 +23,9 @@ A ring appears only when that tool is installed *and* signed in. The arc shows t
 window closest to its limit — the one that will actually stop you. Hovering opens a
 card beside it with every window, its own colour grade, and when it resets.
 
-Each ring carries its provider's own mark; the media ring carries the player's own
-application icon, and swaps to a play/pause control under the pointer, so the ring
-says both what is playing and that clicking does something.
+Each ring carries its provider's own mark and its percentage underneath; the media
+ring carries the player's own application icon and the track position, and falls
+back to a play/pause control when the theme has no icon for it.
 
 Nothing is ever invented: when a vendor stops answering, the last reading stays,
 dimmed, and the card says why it is old. A rejected token says so, and says that
@@ -97,12 +97,33 @@ linotch --help
 |---|---|---|
 | `LINOTCH_EDGE` | `right` | `right`, `left`, `top`, `bottom` |
 | `LINOTCH_OFFSET` | `0.5` | position along that edge, `0.0`–`1.0` |
-| `LINOTCH_OPACITY` | `0.74` | panel opacity, `0.35`–`1.0` |
+| `LINOTCH_OPACITY` | `1.0` | panel opacity, `0.35`–`1.0` |
 | `LINOTCH_SURFACE` | auto | `layer`, `x11`, `floating` |
 
-The panel is translucent, not blurred: blurring behind a surface needs the
-compositor's own protocol (`org_kde_kwin_blur` on KWin, nothing portable), and no
-client can do it for itself. Opacity is the part that is honest everywhere.
+The notch is solid black by default, as upstream's is. `LINOTCH_OPACITY=0.8` makes
+it translucent — not blurred: blurring behind a surface needs the compositor's own
+protocol (`org_kde_kwin_blur` on KWin, nothing portable), and no client can do it
+for itself. Opacity is the part that is honest everywhere.
+
+## Design
+
+The look is codenotch's, taken from its source rather than eyeballed from its
+screenshots. Upstream measured every distance off a 2000×2000 design frame and
+anchored the scale on one value — the provider ring is 44pt across and 117px in the
+frame — so [`src/draw.rs`](src/draw.rs) reproduces the same ratios from the same
+numbers, and the palette (`#00FF88` / `#F2FF00` / `#FF3F00`, `#303030` track,
+`#808080` secondary text) is upstream's sampled values.
+
+That includes the parts that carry the character: the inverse-rounded flares where
+the body meets the bezel, the thin progress arc riding down the middle of the thick
+track, the percentage under each ring, and the tail on the hover card.
+
+One thing is deliberately different. codenotch draws the card in a second window;
+linotch has a single surface, so the card lives inside it. A layer-shell surface is
+anchored by its centre along its edge, which means any change to the window's
+*length* moves the rail by half of it — so the length is computed from the tallest
+card any ring could open, hovered or not, and only the depth changes when a card
+opens. Without that the rail slides up and down as the pointer crosses the rings.
 
 ## When a ring is missing
 
@@ -135,11 +156,12 @@ Provider marks are from [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT
 see [`assets/NOTICE.md`](assets/NOTICE.md). They remain the trademarks of their
 owners.
 
-The idea, and the provider wire formats, come from
+The idea, the design, and the provider wire formats all come from
 [vinzdg/codenotch](https://github.com/vinzdg/codenotch) (MIT) — a macOS app with a
-Windows port. This is a separate Linux implementation, not a fork: the surface layer,
-the drawing, the media ring and the provider code are written from scratch for
-GTK/Wayland.
+Windows port. This is a separate Linux implementation rather than a fork: no code is
+shared, and the surface layer, the drawing, the media ring and the providers are
+written for GTK/Wayland. What *is* shared is the design, on purpose and with its
+numbers taken from upstream's own source.
 
 ## License
 
