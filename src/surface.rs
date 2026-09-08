@@ -85,8 +85,17 @@ impl Surface for LayerShell {
         "wlr-layer-shell"
     }
 
+    /// Re-anchoring a surface that is already mapped is not reliably picked up —
+    /// KWin reads the anchor when the layer surface is created, and a live change
+    /// left the notch floating in the middle of the screen, attached to nothing.
+    /// So the surface is re-created instead of nudged. Cheap, because this only
+    /// happens when a drag ends on a different edge.
     fn set_edge(&self, w: &gtk::ApplicationWindow, edge: Edge) {
         use gtk_layer_shell::{Edge as LsEdge, LayerShell as _};
+        let mapped = w.is_visible();
+        if mapped {
+            w.hide();
+        }
         // Cleared first: moving from one edge to another must not leave the old
         // anchor set, or the surface stretches between the two.
         for e in [LsEdge::Left, LsEdge::Right, LsEdge::Top, LsEdge::Bottom] {
@@ -104,6 +113,9 @@ impl Surface for LayerShell {
         // The leading edge is anchored too, so the margin set in `place` means
         // "this far from the top/left" rather than being ignored.
         w.set_anchor(leading(edge), true);
+        if mapped {
+            w.show();
+        }
     }
 
     fn prepare(&self, w: &gtk::ApplicationWindow, edge: Edge, offset: f64) {

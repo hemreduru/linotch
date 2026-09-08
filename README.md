@@ -83,10 +83,18 @@ install -Dm644 linotch.desktop ~/.config/autostart/linotch.desktop
 Hover a ring for its card. Click the media ring to play/pause. Right-click anywhere
 on the notch for the menu.
 
-**Drag it anywhere.** Press and hold on the notch and move: it follows the pointer
-along its edge, and hops to whichever screen edge is nearest when you cross the
-middle. Where it ends up is saved to `~/.config/linotch/config.json` and restored on
-the next start. `LINOTCH_EDGE` / `LINOTCH_OFFSET` still win when set, so a one-off
+**Drag it.** Press and hold on the notch and move: it slides along its edge, and on
+release it snaps to whichever edge the pointer ended up nearest — the four regions
+being the triangles the screen's diagonals cut. It can only ever come to rest on an
+edge, never adrift in the middle.
+
+The edge is decided on release rather than continuously on purpose. Re-anchoring a
+mapped `layer-shell` surface is not reliably picked up (KWin reads the anchor when
+the surface is created), so switching mid-drag left the notch attached to nothing.
+On release it happens once, and the surface is re-created rather than nudged.
+
+Where it ends up is saved to `~/.config/linotch/config.json` and restored on the
+next start. `LINOTCH_EDGE` / `LINOTCH_OFFSET` still win when set, so a one-off
 override does not overwrite what you placed by hand.
 
 Cards and the menu open *inward*, away from the bezel — leftwards from a right-edge
