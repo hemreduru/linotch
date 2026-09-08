@@ -45,14 +45,28 @@ impl Edge {
     pub fn vertical(self) -> bool {
         matches!(self, Edge::Left | Edge::Right)
     }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Edge::Left => "left",
+            Edge::Right => "right",
+            Edge::Top => "top",
+            Edge::Bottom => "bottom",
+        }
+    }
 }
 
 pub trait Surface {
-    /// Shown in `--check` and the right-click menu, so a bug report says which path ran.
+    /// Shown in `--check` and the menu, so a bug report says which path ran.
     fn name(&self) -> &'static str;
 
     /// Before the window is realized. Layer-shell setup must happen here.
     fn prepare(&self, _w: &gtk::ApplicationWindow, _edge: Edge, _offset: f64) {}
+
+    /// Move to a different edge on a window that is already up — what dragging the
+    /// notch across the screen needs. Separate from `prepare` because that one also
+    /// does the once-only setup.
+    fn set_edge(&self, _w: &gtk::ApplicationWindow, _edge: Edge) {}
 
     /// After the window is shown, and on monitor changes. For servers that place by
     /// coordinate. A compositor-anchored surface leaves this empty.
@@ -71,8 +85,29 @@ impl Surface for LayerShell {
         "wlr-layer-shell"
     }
 
+    fn set_edge(&self, w: &gtk::ApplicationWindow, edge: Edge) {
+        use gtk_layer_shell::{Edge as LsEdge, LayerShell as _};
+        // Cleared first: moving from one edge to another must not leave the old
+        // anchor set, or the surface stretches between the two.
+        for e in [LsEdge::Left, LsEdge::Right, LsEdge::Top, LsEdge::Bottom] {
+            w.set_anchor(e, false);
+        }
+        w.set_anchor(
+            match edge {
+                Edge::Left => LsEdge::Left,
+                Edge::Right => LsEdge::Right,
+                Edge::Top => LsEdge::Top,
+                Edge::Bottom => LsEdge::Bottom,
+            },
+            true,
+        );
+        // The leading edge is anchored too, so the margin set in `place` means
+        // "this far from the top/left" rather than being ignored.
+        w.set_anchor(leading(edge), true);
+    }
+
     fn prepare(&self, w: &gtk::ApplicationWindow, edge: Edge, offset: f64) {
-        use gtk_layer_shell::{Edge as LsEdge, KeyboardMode, Layer, LayerShell as _};
+        use gtk_layer_shell::{KeyboardMode, Layer, LayerShell as _};
         w.init_layer_shell();
         w.set_namespace("linotch");
         w.set_layer(Layer::Overlay);
@@ -82,23 +117,7 @@ impl Surface for LayerShell {
         // 0 = float over the desktop without reserving a strut. Reserving one would
         // shrink every maximised window by the notch's width, which is not the deal.
         w.set_exclusive_zone(0);
-
-        let (anchor, along) = match edge {
-            Edge::Left => (LsEdge::Left, [LsEdge::Top, LsEdge::Bottom]),
-            Edge::Right => (LsEdge::Right, [LsEdge::Top, LsEdge::Bottom]),
-            Edge::Top => (LsEdge::Top, [LsEdge::Left, LsEdge::Right]),
-            Edge::Bottom => (LsEdge::Bottom, [LsEdge::Left, LsEdge::Right]),
-        };
-        w.set_anchor(anchor, true);
-        // Anchoring only the one edge leaves the compositor to centre us along the
-        // other axis, which is what the offset then nudges.
-        for e in along {
-            w.set_anchor(e, false);
-        }
-
-        // The leading edge is anchored too, so the margin set in `place` means
-        // "this far from the top/left" rather than being ignored.
-        w.set_anchor(leading(edge), true);
+        self.set_edge(w, edge);
         let _ = offset; // applied in place(), once the window's own size is known
     }
 
@@ -190,7 +209,9 @@ impl Surface for Floating {
 
 // ------------------------------------------------------------------ detect
 
-fn monitor_geometry(w: &gtk::ApplicationWindow) -> Option<gdk::Rectangle> {
+/// The monitor the notch is on. Dragging needs it to turn a pointer position into
+/// a fraction along an edge, so it is public.
+pub fn monitor_geometry(w: &gtk::ApplicationWindow) -> Option<gdk::Rectangle> {
     let display = w.display();
     let mon = w
         .window()

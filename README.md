@@ -5,7 +5,7 @@ much of its limit you have burned, and one for whatever is playing — which is 
 the play/pause button.
 
 <p align="center"><img src="docs/preview.png" alt="The notch, shut and with a card open" width="478"></p>
-<p align="center"><sub>Shut, and with a ring hovered. Sample data.</sub></p>
+<p align="center"><sub>Shut, with a ring hovered, and with the right-click menu open. Sample data.</sub></p>
 
 Linux only, and Wayland-first: the notch is a real `wlr-layer-shell` surface, not a
 window nudged into place. It signs in nowhere — every reading is borrowed from a
@@ -80,8 +80,21 @@ install -Dm644 linotch.desktop ~/.config/autostart/linotch.desktop
 
 ## Use
 
-Hover a ring for its card. Click the media ring to play/pause. Right-click for
-refresh and quit.
+Hover a ring for its card. Click the media ring to play/pause. Right-click anywhere
+on the notch for the menu.
+
+**Drag it anywhere.** Press and hold on the notch and move: it follows the pointer
+along its edge, and hops to whichever screen edge is nearest when you cross the
+middle. Where it ends up is saved to `~/.config/linotch/config.json` and restored on
+the next start. `LINOTCH_EDGE` / `LINOTCH_OFFSET` still win when set, so a one-off
+override does not overwrite what you placed by hand.
+
+Cards and the menu open *inward*, away from the bezel — leftwards from a right-edge
+notch, downwards from a top one — and they grow out of the tail on a spring that
+overshoots slightly, so a panel reads as coming out of the notch rather than
+appearing beside it. The menu is drawn in the same skin for the same reason: GTK's
+own menu is a separate window, and a Wayland compositor puts that in the middle of
+the screen, nowhere near what was clicked.
 
 Usage is re-read every three minutes. That is deliberate: a limit window does not
 move fast enough to be worth a per-minute poll, and the vendors answer a burst with

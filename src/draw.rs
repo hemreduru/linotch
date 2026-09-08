@@ -62,6 +62,16 @@ const LABEL_TO_BAR: f64 = px(16.8);
 const BAR_TO_USED: f64 = px(17.8);
 const BLOCK_SPACING: f64 = px(20.0);
 
+// ---- menu -------------------------------------------------------------------
+// Upstream has no menu (macOS gives it one for free). These follow the card's
+// proportions rather than inventing a second visual language.
+const MENU_W: f64 = px(400.0);
+const MENU_ROW_H: f64 = px(74.0);
+const MENU_PAD: f64 = px(20.0);
+
+/// The menu's items, in order. `main` maps the index to an action.
+pub const MENU: [&str; 2] = ["Refresh now", "Quit linotch"];
+
 // ---- type -------------------------------------------------------------------
 const FONT_PERCENT: f64 = font_px(27.0);
 const FONT_TITLE: f64 = font_px(26.0);
@@ -125,6 +135,24 @@ impl Rect {
     }
 }
 
+/// What is open beside the rail.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind {
+    /// The hovered ring's readings.
+    Card,
+    /// The right-click menu, drawn as a card so it comes out of the notch in the
+    /// same skin — GTK's own menu is a separate window the compositor puts in the
+    /// middle of the screen, which is nowhere near where it was asked for.
+    Menu,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Open {
+    /// The ring the panel points at.
+    pub ring: usize,
+    pub kind: Kind,
+}
+
 pub struct Layout {
     pub w: f64,
     pub h: f64,
@@ -132,9 +160,9 @@ pub struct Layout {
     pub centers: Vec<(f64, f64)>,
     /// The notch body.
     pub rail: Rect,
-    /// The open card, when one ring is hovered.
-    pub card: Option<Rect>,
-    /// Tail tip, pointing at the hovered ring.
+    /// The open card or menu.
+    pub panel: Option<Rect>,
+    /// Tail tip, pointing at the ring the panel belongs to.
     pub tail: Option<(f64, f64)>,
 }
 
@@ -146,6 +174,26 @@ fn cell_extent() -> f64 {
 fn rail_run(n: usize) -> f64 {
     let n = n.max(1) as f64;
     2.0 * CURL + PAD_LEAD + n * cell_extent() + (n - 1.0) * CELL_SPACING + PAD_TRAIL
+}
+
+fn menu_height() -> f64 {
+    2.0 * MENU_PAD + MENU.len() as f64 * MENU_ROW_H
+}
+
+fn panel_size(rings: &[Ring], open: Open) -> (f64, f64) {
+    match open.kind {
+        Kind::Menu => (MENU_W, menu_height()),
+        Kind::Card => (
+            CARD_W,
+            rings.get(open.ring).map(card_height).unwrap_or(menu_height()),
+        ),
+    }
+}
+
+/// The widest a panel can ever get, so the window's depth is known before one
+/// opens and the rail never has to move to make room.
+fn widest_panel() -> f64 {
+    CARD_W.max(MENU_W)
 }
 
 fn card_height(ring: &Ring) -> f64 {
@@ -173,15 +221,12 @@ fn card_height(ring: &Ring) -> f64 {
 /// half of it; sizing the window to the hovered card made the rail jump every time
 /// the pointer crossed a ring. The length is therefore computed from the tallest
 /// card *any* ring could open, hovered or not, and only the depth changes.
-pub fn layout(rings: &[Ring], edge: Edge, hover: Option<usize>) -> Layout {
-    let run = rail_run(rings.len()).max(
-        rings
-            .iter()
-            .map(card_height)
-            .fold(0.0_f64, f64::max),
-    );
-    let open = hover.and_then(|i| rings.get(i)).is_some();
-    let depth = RAIL_DEPTH + if open { CARD_W + TAIL_LEN + TAIL_GAP } else { 0.0 };
+pub fn layout(rings: &[Ring], edge: Edge, open: Option<Open>) -> Layout {
+    let run = rail_run(rings.len())
+        .max(rings.iter().map(card_height).fold(0.0_f64, f64::max))
+        .max(menu_height());
+    let depth = RAIL_DEPTH
+        + if open.is_some() { widest_panel() + TAIL_LEN + TAIL_GAP } else { 0.0 };
 
     let (w, h) = if edge.vertical() { (depth, run) } else { (run, depth) };
     let rail = match edge {
@@ -203,44 +248,47 @@ pub fn layout(rings: &[Ring], edge: Edge, hover: Option<usize>) -> Layout {
         })
         .collect::<Vec<_>>();
 
-    let (card, tail) = match hover.and_then(|i| rings.get(i).map(|r| (i, r))) {
+    // The panel hangs off whichever side of the rail faces the screen, so it opens
+    // away from the bezel: leftwards from a right-edge notch, downwards from a top
+    // one. The window is already wide enough for the widest panel, so a narrow one
+    // simply sits against the rail rather than being centred in dead space.
+    let (panel, tail) = match open.and_then(|o| centers.get(o.ring).map(|c| (o, *c))) {
         None => (None, None),
-        Some((i, ring)) => {
-            let ch = card_height(ring);
-            let (cx, cy) = centers[i];
-            let (card, tip) = match edge {
+        Some((o, (cx, cy))) => {
+            let (pw, ph) = panel_size(rings, o);
+            let along = |v: f64, extent: f64, limit: f64| (v - extent / 2.0).clamp(0.0, (limit - extent).max(0.0));
+            let (rect, tip) = match edge {
                 Edge::Right => (
-                    Rect { x: 0.0, y: (cy - ch / 2.0).clamp(0.0, (h - ch).max(0.0)), w: CARD_W, h: ch },
+                    Rect { x: rail.x - TAIL_GAP - TAIL_LEN - pw, y: along(cy, ph, h), w: pw, h: ph },
                     (rail.x - TAIL_GAP, cy),
                 ),
                 Edge::Left => (
-                    Rect {
-                        x: w - CARD_W,
-                        y: (cy - ch / 2.0).clamp(0.0, (h - ch).max(0.0)),
-                        w: CARD_W,
-                        h: ch,
-                    },
+                    Rect { x: rail.x + RAIL_DEPTH + TAIL_GAP + TAIL_LEN, y: along(cy, ph, h), w: pw, h: ph },
                     (rail.x + RAIL_DEPTH + TAIL_GAP, cy),
                 ),
                 Edge::Bottom => (
-                    Rect { x: (cx - CARD_W / 2.0).clamp(0.0, (w - CARD_W).max(0.0)), y: 0.0, w: CARD_W, h: ch },
+                    Rect { x: along(cx, pw, w), y: rail.y - TAIL_GAP - TAIL_LEN - ph, w: pw, h: ph },
                     (cx, rail.y - TAIL_GAP),
                 ),
                 Edge::Top => (
-                    Rect {
-                        x: (cx - CARD_W / 2.0).clamp(0.0, (w - CARD_W).max(0.0)),
-                        y: h - ch,
-                        w: CARD_W,
-                        h: ch,
-                    },
+                    Rect { x: along(cx, pw, w), y: rail.y + RAIL_DEPTH + TAIL_GAP + TAIL_LEN, w: pw, h: ph },
                     (cx, rail.y + RAIL_DEPTH + TAIL_GAP),
                 ),
             };
-            (Some(card), Some(tip))
+            (Some(rect), Some(tip))
         }
     };
 
-    Layout { w, h, centers, rail, card, tail }
+    Layout { w, h, centers, rail, panel, tail }
+}
+
+/// Which menu row the point is over, given the panel rect the menu was drawn in.
+pub fn menu_hit(rect: Rect, x: f64, y: f64) -> Option<usize> {
+    if !rect.contains(x, y) {
+        return None;
+    }
+    let i = ((y - rect.y - MENU_PAD) / MENU_ROW_H).floor();
+    (i >= 0.0 && (i as usize) < MENU.len()).then_some(i as usize)
 }
 
 /// Which ring contains the point, if any. The target is the whole cell, not the
@@ -409,37 +457,111 @@ fn text(
 
 // --------------------------------------------------------------------- draw
 
-pub fn draw(cr: &cairo::Context, rings: &[Ring], l: &Layout, edge: Edge, hover: Option<usize>) {
+/// `t` is the panel's open-ness: 0 shut, 1 open, and a little past 1 while the
+/// spring overshoots — which is what gives the pop. `hot` highlights a menu row.
+pub fn draw(
+    cr: &cairo::Context,
+    rings: &[Ring],
+    l: &Layout,
+    edge: Edge,
+    open: Option<Open>,
+    t: f64,
+    hot: Option<usize>,
+) {
     cr.set_operator(cairo::Operator::Source);
     cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
     let _ = cr.paint();
     cr.set_operator(cairo::Operator::Over);
 
-    if let (Some(rect), Some(tip), Some(ring)) = (l.card, l.tail, hover.and_then(|i| rings.get(i))) {
-        // Tail and card are one filled shape, so no seam shows between them.
-        tail_path(cr, tip, edge);
-        rgba(cr, body_fill());
-        let _ = cr.fill();
-        rounded(cr, rect, CARD_CORNER);
-        rgba(cr, body_fill());
-        let _ = cr.fill();
-        card(cr, rect, ring);
+    if let (Some(rect), Some(tip), Some(o)) = (l.panel, l.tail, open) {
+        if t > 0.004 {
+            let _ = cr.save();
+            // Grow out of the tail tip rather than the panel's own centre: the
+            // panel should look like it came from the notch, not like it faded in
+            // somewhere nearby.
+            cr.translate(tip.0, tip.1);
+            let scale = 0.88 + 0.12 * t;
+            cr.scale(scale, scale);
+            cr.translate(-tip.0, -tip.1);
+            // One group, one alpha — otherwise the tail and the panel cross-fade
+            // against each other and the seam between them shows.
+            let _ = cr.push_group();
+
+            tail_path(cr, tip, edge);
+            rgba(cr, body_fill());
+            let _ = cr.fill();
+            rounded(cr, rect, CARD_CORNER);
+            rgba(cr, body_fill());
+            let _ = cr.fill();
+            match o.kind {
+                Kind::Card => {
+                    if let Some(ring) = rings.get(o.ring) {
+                        card(cr, rect, ring);
+                    }
+                }
+                Kind::Menu => menu(cr, rect, hot),
+            }
+
+            let _ = cr.pop_group_to_source();
+            let _ = cr.paint_with_alpha(t.clamp(0.0, 1.0));
+            let _ = cr.restore();
+        }
     }
 
     notch_path(cr, l.rail, edge);
     rgba(cr, body_fill());
     let _ = cr.fill();
 
-    for (ring, &(cx, cy)) in rings.iter().zip(l.centers.iter()) {
-        ring_at(cr, ring, cx, cy);
+    for (i, (ring, &(cx, cy))) in rings.iter().zip(l.centers.iter()).enumerate() {
+        let lit = match open {
+            Some(o) if o.ring == i => t.clamp(0.0, 1.0),
+            _ => 0.0,
+        };
+        ring_at(cr, ring, cx, cy, lit);
     }
 }
 
-fn ring_at(cr: &cairo::Context, ring: &Ring, cx: f64, cy: f64) {
+fn menu(cr: &cairo::Context, rect: Rect, hot: Option<usize>) {
+    for (i, item) in MENU.iter().enumerate() {
+        let y = rect.y + MENU_PAD + i as f64 * MENU_ROW_H;
+        if hot == Some(i) {
+            rounded(
+                cr,
+                Rect { x: rect.x + MENU_PAD * 0.4, y, w: rect.w - MENU_PAD * 0.8, h: MENU_ROW_H },
+                MENU_ROW_H * 0.32,
+            );
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.11);
+            let _ = cr.fill();
+        }
+        text(
+            cr,
+            rect.x + MENU_PAD,
+            y + (MENU_ROW_H - line(FONT_BODY)) / 2.0,
+            rect.w - 2.0 * MENU_PAD,
+            item,
+            FONT_BODY,
+            pango::Weight::Normal,
+            TEXT,
+            pango::Alignment::Left,
+        );
+    }
+}
+
+fn ring_at(cr: &cairo::Context, ring: &Ring, cx: f64, cy: f64, lit: f64) {
     let a = ring.alpha();
     // strokeBorder: the track sits inside the diameter, so both strokes share the
     // same centre radius and the thin arc rides down the middle of the thick one.
     let r = (RING_D - TRACK_STROKE) / 2.0;
+
+    if lit > 0.004 {
+        // A halo rather than a size change: growing the ring would slide the mark
+        // out from under the pointer that is hovering it.
+        cr.new_path();
+        cr.set_line_width(1.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.16 * lit);
+        cr.arc(cx, cy, RING_D / 2.0 + px(14.0) * lit, 0.0, 2.0 * PI);
+        let _ = cr.stroke();
+    }
 
     cr.new_path();
     cr.set_line_width(TRACK_STROKE);
@@ -570,11 +692,15 @@ mod tests {
         r
     }
 
+    fn card_on(ring: usize) -> Option<Open> {
+        Some(Open { ring, kind: Kind::Card })
+    }
+
     #[test]
     fn every_drawn_ring_is_clickable_at_its_own_centre() {
         let rings: Vec<Ring> = (0..4).map(|_| ring(2)).collect();
         for edge in [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom] {
-            for hover in [None, Some(0), Some(3)] {
+            for hover in [None, card_on(0), card_on(3)] {
                 let l = layout(&rings, edge, hover);
                 for (i, &(x, y)) in l.centers.iter().enumerate() {
                     assert_eq!(hit(&l, x, y), Some(i), "{edge:?} hover={hover:?} ring {i}");
@@ -594,7 +720,7 @@ mod tests {
             for edge in [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom] {
                 let shut = layout(&rings, edge, None);
                 for hover in 0..rings.len() {
-                    let open = layout(&rings, edge, Some(hover));
+                    let open = layout(&rings, edge, card_on(hover));
                     let (a, b) = if edge.vertical() {
                         (shut.h, open.h)
                     } else {
@@ -621,8 +747,8 @@ mod tests {
         let rings: Vec<Ring> = (0..3).map(|_| ring(3)).collect();
         for edge in [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom] {
             for hover in 0..rings.len() {
-                let l = layout(&rings, edge, Some(hover));
-                let c = l.card.expect("hover opens a card");
+                let l = layout(&rings, edge, card_on(hover));
+                let c = l.panel.expect("hover opens a card");
                 let (tx, ty) = l.tail.expect("hover places a tail");
                 assert!(c.x >= 0.0 && c.y >= 0.0, "{edge:?} card off the top/left");
                 assert!(
@@ -635,6 +761,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn menu_rows_are_hittable_and_the_gaps_are_not() {
+        let rings: Vec<Ring> = (0..3).map(|_| ring(1)).collect();
+        let l = layout(&rings, Edge::Right, Some(Open { ring: 1, kind: Kind::Menu }));
+        let r = l.panel.expect("the menu is a panel");
+        for i in 0..MENU.len() {
+            let y = r.y + MENU_PAD + (i as f64 + 0.5) * MENU_ROW_H;
+            assert_eq!(menu_hit(r, r.x + r.w / 2.0, y), Some(i), "row {i}");
+        }
+        assert_eq!(menu_hit(r, r.x + r.w / 2.0, r.y + 1.0), None, "top padding");
+        assert_eq!(menu_hit(r, r.x - 5.0, r.y + r.h / 2.0), None, "outside");
     }
 
     /// Bands are upstream's, and the boundaries are the part worth pinning.
@@ -706,19 +845,29 @@ fn preview() {
     ];
 
     let shut = layout(&rings, Edge::Right, None);
-    let open = layout(&rings, Edge::Right, Some(0));
+    let open = layout(&rings, Edge::Right, Some(Open { ring: 0, kind: Kind::Card }));
+    let menu = layout(&rings, Edge::Right, Some(Open { ring: 2, kind: Kind::Menu }));
     let (pad, gap) = (26.0, 26.0);
-    let w = (pad * 2.0 + shut.w + gap + open.w) as i32;
+    let w = (pad * 2.0 + shut.w + gap + open.w + gap + menu.w) as i32;
     let h = (pad * 2.0 + shut.h.max(open.h)) as i32;
 
     let surf = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap();
     let cr = cairo::Context::new(&surf).unwrap();
-    for (l, hover, x) in [(&shut, None, pad), (&open, Some(0), pad + shut.w + gap)] {
+    for (l, open, hot, x) in [
+        (&shut, None, None, pad),
+        (&open, Some(Open { ring: 0, kind: Kind::Card }), None, pad + shut.w + gap),
+        (
+            &menu,
+            Some(Open { ring: 2, kind: Kind::Menu }),
+            Some(0),
+            pad + shut.w + gap + open.w + gap,
+        ),
+    ] {
         cr.save().unwrap();
         cr.translate(x, pad);
         cr.rectangle(0.0, 0.0, l.w, l.h);
         cr.clip();
-        draw(&cr, &rings, l, Edge::Right, hover);
+        draw(&cr, &rings, l, Edge::Right, open, 1.0, hot);
         cr.restore().unwrap();
     }
     // draw() clears its own clip first, so the backdrop goes on underneath.
