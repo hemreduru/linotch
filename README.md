@@ -57,7 +57,8 @@ sudo pacman -S --needed gtk3 gtk-layer-shell rust
 git clone https://github.com/hemreduru/linotch && cd linotch
 cargo build --release
 install -Dm755 target/release/linotch ~/.local/bin/linotch
-install -Dm644 linotch.desktop ~/.config/autostart/linotch.desktop
+sed "s|^Exec=linotch|Exec=$HOME/.local/bin/linotch|" linotch.desktop \
+  > ~/.config/autostart/linotch.desktop      # start with your session
 linotch &
 ```
 
@@ -70,7 +71,8 @@ sudo apt install -y libgtk-3-dev libgtk-layer-shell-dev cargo
 git clone https://github.com/hemreduru/linotch && cd linotch
 cargo build --release
 install -Dm755 target/release/linotch ~/.local/bin/linotch
-install -Dm644 linotch.desktop ~/.config/autostart/linotch.desktop
+sed "s|^Exec=linotch|Exec=$HOME/.local/bin/linotch|" linotch.desktop \
+  > ~/.config/autostart/linotch.desktop      # start with your session
 linotch &
 ```
 
