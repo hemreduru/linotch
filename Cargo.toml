@@ -7,13 +7,14 @@ license = "MIT"
 repository = "https://github.com/hemreduru/linotch"
 
 [dependencies]
-cairo-rs = "0.18"
+cairo-rs = { version = "0.18", features = ["png"] }
 chrono = "0.4.45"
 dirs = "7.0.0"
 gdk = "0.18"
 glib = "0.18"
 gtk = "0.18"
 gtk-layer-shell = { version = "0.8.2", features = ["v0_6"] }
+pangocairo = "0.18"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 ureq = { version = "3.4.1", features = ["json"] }

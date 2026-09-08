@@ -32,8 +32,10 @@ pub enum Error {
     /// A credential exists but the vendor refused it. Kept apart from NoCredential
     /// because the fix is different: this one is "use the tool once so it refreshes".
     Rejected { code: u16, expired: bool },
-    /// HTTP 429. The caller backs off; the vendor is not asked again meanwhile.
-    RateLimited,
+    /// HTTP 429. `retry_after` is the vendor's own Retry-After in seconds — it is
+    /// routinely far longer than any backoff we would guess (half an hour, where
+    /// our cap was fifteen minutes), and ignoring it just keeps the limit alive.
+    RateLimited { retry_after: Option<u64> },
     Other(String),
 }
 
@@ -48,7 +50,10 @@ impl std::fmt::Display for Error {
             Error::Rejected { code, expired: false } => {
                 write!(f, "token rejected ({code}) — sign in with the tool itself")
             }
-            Error::RateLimited => write!(f, "rate limited"),
+            Error::RateLimited { retry_after: Some(s) } => {
+                write!(f, "rate limited — retry {}", until(now_secs() + *s as i64))
+            }
+            Error::RateLimited { retry_after: None } => write!(f, "rate limited"),
             Error::Other(m) => write!(f, "{m}"),
         }
     }
@@ -56,8 +61,11 @@ impl std::fmt::Display for Error {
 
 pub trait Provider: Send {
     fn label(&self) -> &'static str;
-    /// One or two characters drawn in the middle of the ring.
-    fn mark(&self) -> &'static str;
+    /// Name of the embedded brand mark in `assets/` (see `icons`).
+    fn asset(&self) -> &'static str;
+    /// The mark's colour. Brand colours are what make the rail readable at a
+    /// glance without labels.
+    fn brand(&self) -> (f64, f64, f64);
     /// Offline, cheap. False means the tool is not installed and no ring is drawn.
     fn present(&self) -> bool;
     fn read(&self) -> Result<Vec<Window>, Error>;
@@ -104,15 +112,34 @@ fn agent() -> ureq::Agent {
     // and the notch would keep showing a stale number with no hint why.
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(15)))
+        // See interpret(): we need the response, not an error, on 4xx.
+        .http_status_as_error(false)
         .build()
         .into()
 }
 
-fn to_err(e: ureq::Error, expired: bool) -> Error {
-    match e {
-        ureq::Error::StatusCode(c @ (401 | 403)) => Error::Rejected { code: c, expired },
-        ureq::Error::StatusCode(429) => Error::RateLimited,
-        other => Error::Other(other.to_string()),
+/// Turns an HTTP reply into our own error taxonomy.
+///
+/// Statuses are interpreted here rather than by ureq (`http_status_as_error(false)`)
+/// for one reason: a 429's `Retry-After` header only survives if the response object
+/// does, and that header is the difference between backing off correctly and
+/// hammering a limit until it renews itself.
+fn interpret(resp: &mut ureq::http::Response<ureq::Body>, expired: bool) -> Result<Value, Error> {
+    let code = resp.status().as_u16();
+    match code {
+        200..=299 => resp
+            .body_mut()
+            .read_json()
+            .map_err(|e| Error::Other(format!("parse: {e}"))),
+        401 | 403 => Err(Error::Rejected { code, expired }),
+        429 => Err(Error::RateLimited {
+            retry_after: resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse().ok()),
+        }),
+        _ => Err(Error::Other(format!("HTTP {code}"))),
     }
 }
 
@@ -153,8 +180,11 @@ impl Provider for Claude {
     fn label(&self) -> &'static str {
         "Claude"
     }
-    fn mark(&self) -> &'static str {
-        "C"
+    fn asset(&self) -> &'static str {
+        "claude"
+    }
+    fn brand(&self) -> (f64, f64, f64) {
+        (0.851, 0.467, 0.341) // #d97757
     }
 
     /// A signed-in Claude Code, not merely a `~/.claude` left behind by one. An
@@ -170,11 +200,8 @@ impl Provider for Claude {
             .header("Authorization", &format!("Bearer {token}"))
             .header("anthropic-beta", "oauth-2025-04-20")
             .call()
-            .map_err(|e| to_err(e, expired))?;
-        let v: Value = resp
-            .body_mut()
-            .read_json()
-            .map_err(|e| Error::Other(format!("parse: {e}")))?;
+            .map_err(|e| Error::Other(e.to_string()))?;
+        let v = interpret(&mut resp, expired)?;
 
         let mut out = Vec::new();
         if let Some(arr) = v.get("limits").and_then(|x| x.as_array()) {
@@ -249,8 +276,11 @@ impl Provider for Codex {
     fn label(&self) -> &'static str {
         "Codex"
     }
-    fn mark(&self) -> &'static str {
-        "X"
+    fn asset(&self) -> &'static str {
+        "openai"
+    }
+    fn brand(&self) -> (f64, f64, f64) {
+        (1.0, 1.0, 1.0)
     }
 
     fn present(&self) -> bool {
@@ -269,11 +299,8 @@ impl Provider for Codex {
                 concat!("linotch/", env!("CARGO_PKG_VERSION"), " (Linux)"),
             )
             .call()
-            .map_err(|e| to_err(e, false))?;
-        let v: Value = resp
-            .body_mut()
-            .read_json()
-            .map_err(|e| Error::Other(format!("parse: {e}")))?;
+            .map_err(|e| Error::Other(e.to_string()))?;
+        let v = interpret(&mut resp, false)?;
 
         let rl = v.get("rate_limit").unwrap_or(&v);
         let now = now_secs();

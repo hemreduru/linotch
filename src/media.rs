@@ -32,6 +32,11 @@ pub struct Media {
     /// True when a length was published, so the ring can tell "at the start"
     /// apart from "no idea".
     pub has_progress: bool,
+    /// Seconds, for the card's "2:14 / 5:03".
+    pub position: f64,
+    pub length: f64,
+    /// The player's own desktop-entry name, used to draw its application icon.
+    pub desktop_entry: String,
 }
 
 fn as_str(v: &OwnedValue) -> Option<String> {
@@ -96,10 +101,16 @@ pub fn poll(conn: &Connection) -> Option<Media> {
         let position: i64 = p.get_property("Position").unwrap_or(0);
         let has_progress = length > 0;
 
+        let root = Proxy::new(conn, bus.clone(), PATH, ROOT).ok();
         let m = Media {
-            identity: Proxy::new(conn, bus.clone(), PATH, ROOT)
-                .ok()
+            identity: root
+                .as_ref()
                 .and_then(|r| r.get_property::<String>("Identity").ok())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| bus.trim_start_matches(PREFIX).to_string()),
+            desktop_entry: root
+                .as_ref()
+                .and_then(|r| r.get_property::<String>("DesktopEntry").ok())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| bus.trim_start_matches(PREFIX).to_string()),
             title: meta
@@ -114,6 +125,9 @@ pub fn poll(conn: &Connection) -> Option<Media> {
                 0.0
             },
             has_progress,
+            // MPRIS counts in microseconds.
+            position: position as f64 / 1e6,
+            length: length as f64 / 1e6,
             bus,
         };
         if m.playing {

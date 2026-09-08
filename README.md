@@ -4,7 +4,8 @@ A small pill on the edge of your screen: one ring per coding assistant showing h
 much of its limit you have burned, and one for whatever is playing — which is also
 the play/pause button.
 
-<p align="center"><img src="docs/notch.png" alt="The notch on the right edge of the screen" width="120"></p>
+<p align="center"><img src="docs/preview.png" alt="The notch, shut and with a card open" width="478"></p>
+<p align="center"><sub>Shut, and with a ring hovered. Sample data.</sub></p>
 
 Linux only, and Wayland-first: the notch is a real `wlr-layer-shell` surface, not a
 window nudged into place. It signs in nowhere — every reading is borrowed from a
@@ -19,12 +20,18 @@ credential a tool on your machine already holds.
 | **Media** | Any MPRIS player on the session bus | Track progress; click to play/pause |
 
 A ring appears only when that tool is installed *and* signed in. The arc shows the
-window closest to its limit — the one that will actually stop you — and hovering
-lists every window with its reset time.
+window closest to its limit — the one that will actually stop you. Hovering opens a
+card beside it with every window, its own colour grade, and when it resets.
+
+Each ring carries its provider's own mark; the media ring carries the player's own
+application icon, and swaps to a play/pause control under the pointer, so the ring
+says both what is playing and that clicking does something.
 
 Nothing is ever invented: when a vendor stops answering, the last reading stays,
-dimmed, and the tooltip says why it is old. A rejected token says so, and says that
-using the tool once will refresh it.
+dimmed, and the card says why it is old. A rejected token says so, and says that
+using the tool once will refresh it. A rate limit is waited out for exactly as long
+as the vendor's own `Retry-After` asks — asking again early is what keeps a limit
+alive instead of letting it lapse.
 
 Media works with anything that speaks MPRIS — Spotify, VLC, mpv, Firefox, Chromium,
 KDE's browser integration — because that is the interface the desktop's own media
@@ -73,8 +80,13 @@ install -Dm644 linotch.desktop ~/.config/autostart/linotch.desktop
 
 ## Use
 
-Hover a ring for its detail. Click the media ring to play/pause. Right-click for the
-menu.
+Hover a ring for its card. Click the media ring to play/pause. Right-click for
+refresh and quit.
+
+Usage is re-read every three minutes. That is deliberate: a limit window does not
+move fast enough to be worth a per-minute poll, and the vendors answer a burst with
+a Retry-After measured in half hours. "Refresh now" in the right-click menu skips
+the wait.
 
 ```bash
 linotch --check      # what each source reports, and why one is missing
@@ -99,6 +111,10 @@ before any network call. Two rules the existing ones follow:
   than showing a zero that looks like a reading.
 
 ## Credits
+
+Provider marks are from [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT) —
+see [`assets/NOTICE.md`](assets/NOTICE.md). They remain the trademarks of their
+owners.
 
 The idea, and the provider wire formats, come from
 [vinzdg/codenotch](https://github.com/vinzdg/codenotch) (MIT) — a macOS app with a

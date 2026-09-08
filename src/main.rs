@@ -1,14 +1,15 @@
 //! linotch — a usage notch for Linux.
 //!
-//! A small pill on a screen edge: one ring per coding assistant showing how much of
-//! its limit is gone, plus one for whatever is playing, which doubles as a
-//! play/pause button.
+//! A pill on a screen edge: one ring per coding assistant showing how much of its
+//! limit is gone, plus one for whatever is playing, which doubles as a play/pause
+//! button. Hovering a ring opens a card beside it.
 //!
 //! Threading: one worker owns every read (HTTP and D-Bus both block) and publishes
 //! into a mutex; GTK only ever paints what it finds there. Nothing blocking runs on
 //! the UI thread, which is why the notch keeps redrawing while a provider hangs.
 
 mod draw;
+mod icons;
 mod media;
 mod providers;
 mod ring;
@@ -17,15 +18,24 @@ mod surface;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use providers::Provider;
-use ring::{Action, Glyph, Health, Ring};
+use ring::{Action, Glyph, Health, Ring, Row};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use surface::Edge;
 
-const POLL_OK: Duration = Duration::from_secs(60);
+// Three minutes, not one: a limit window does not move fast enough to be worth a
+// per-minute poll, and the usage endpoint answers a burst with a Retry-After
+// measured in half hours.
+const POLL_OK: Duration = Duration::from_secs(180);
 const POLL_NO_CREDENTIAL: Duration = Duration::from_secs(300);
 const BACKOFF_BASE: Duration = Duration::from_secs(60);
 const BACKOFF_CAP: Duration = Duration::from_secs(900);
+
+/// Set by the tray menu, cleared by the worker: an immediate re-read without
+/// waiting out POLL_OK.
+static REFRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Default)]
 struct Shared {
@@ -33,13 +43,6 @@ struct Shared {
     /// Bus name of the player the media ring was drawn for, so a click acts on the
     /// player that was on screen and not on whatever started since.
     media_bus: Option<String>,
-}
-
-fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
 }
 
 fn main() {
@@ -60,7 +63,10 @@ fn main() {
         .ok()
         .and_then(|s| Edge::parse(&s))
         .unwrap_or(Edge::Right);
-    let offset = env_f64("LINOTCH_OFFSET", 0.5);
+    let offset = std::env::var("LINOTCH_OFFSET")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.5);
 
     let shared = Arc::new(Mutex::new(Shared::default()));
     std::thread::spawn({
@@ -128,9 +134,10 @@ fn check() {
 
     match zbus::blocking::Connection::session().map(|c| media::poll(&c)) {
         Ok(Some(m)) => println!(
-            "{:8} {} — {} ({})",
+            "{:8} {} [{}] — {} ({})",
             "media",
             m.identity,
+            m.desktop_entry,
             media::describe(&m),
             if m.playing { "playing" } else { "paused" }
         ),
@@ -154,7 +161,7 @@ fn worker(shared: Arc<Mutex<Shared>>) {
         .into_iter()
         .filter(|p| p.present())
         .map(|p| Slot {
-            ring: Ring::usage(p.label(), p.mark()),
+            ring: Ring::usage(p.label(), p.asset(), p.brand()),
             provider: p,
             fails: 0,
             next: Instant::now(),
@@ -167,54 +174,71 @@ fn worker(shared: Arc<Mutex<Shared>>) {
 
     loop {
         let now = Instant::now();
+        let forced = REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed);
         for s in &mut slots {
-            if now < s.next {
+            if now < s.next && !forced {
                 continue;
             }
             match s.provider.read() {
                 Ok(ws) if !ws.is_empty() => {
                     // The ring shows the window closest to its limit — the one that
-                    // will actually stop you — while the tooltip lists them all.
+                    // will actually stop you — while the card lists them all.
                     let worst = ws
                         .iter()
                         .max_by(|a, b| a.used.total_cmp(&b.used))
                         .expect("non-empty");
                     s.ring.fraction = worst.used;
                     s.ring.health = Health::Ok;
-                    s.ring.detail = ws
+                    s.ring.note.clear();
+                    s.ring.rows = ws
                         .iter()
-                        .map(|w| {
-                            let when = w
+                        .map(|w| Row {
+                            label: w.label.clone(),
+                            value: format!("{:.0}%", w.used * 100.0),
+                            bar: Some(w.used),
+                            note: w
                                 .resets_at
                                 .map(providers::until)
-                                .unwrap_or_else(|| "?".into());
-                            format!("{}  {:.0}%  resets {}", w.label, w.used * 100.0, when)
+                                .unwrap_or_else(|| String::new()),
                         })
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                        .collect();
                     s.fails = 0;
                     s.next = now + POLL_OK;
                 }
                 Ok(_) => {
                     s.ring.health = Health::Idle;
-                    s.ring.detail = "no limit windows reported".into();
+                    s.ring.note = "no limit windows reported".into();
                     s.next = now + POLL_OK;
                 }
                 Err(e @ (providers::Error::NoCredential | providers::Error::Rejected { .. })) => {
                     s.ring.health = Health::NeedsAuth;
                     s.ring.fraction = 0.0;
-                    s.ring.detail = e.to_string();
+                    s.ring.rows.clear();
+                    s.ring.note = e.to_string();
                     s.next = now + POLL_NO_CREDENTIAL;
                 }
                 Err(e) => {
                     // Never invent a number: the last reading stays, dimmed, and the
-                    // tooltip says why it is old.
+                    // card says why it is old.
                     s.fails = s.fails.saturating_add(1);
                     if s.ring.health == Health::Ok {
                         s.ring.health = Health::Stale;
                     }
-                    s.ring.detail = format!("{}\nlast reading kept ({e})", s.ring.detail);
-                    s.next = now + backoff(s.fails);
+                    // The vendor's own Retry-After wins whenever it is longer than
+                    // our backoff — asking again before it expires is what keeps a
+                    // rate limit alive instead of letting it lapse.
+                    let wait = match e {
+                        providers::Error::RateLimited { retry_after: Some(s) } => {
+                            Duration::from_secs(s).max(backoff(1))
+                        }
+                        _ => backoff(s.fails),
+                    };
+                    s.ring.note = if s.ring.rows.is_empty() {
+                        e.to_string()
+                    } else {
+                        format!("{e} — showing the last reading")
+                    };
+                    s.next = now + wait;
                 }
             }
         }
@@ -223,24 +247,7 @@ fn worker(shared: Arc<Mutex<Shared>>) {
         let mut rings: Vec<Ring> = slots.iter().map(|s| s.ring.clone()).collect();
         let media_bus = m.as_ref().map(|m| m.bus.clone());
         if let Some(m) = m {
-            rings.push(Ring {
-                label: m.identity.clone(),
-                detail: format!(
-                    "{}\n{}\nclick to {}",
-                    media::describe(&m),
-                    if m.playing { "playing" } else { "paused" },
-                    if m.playing { "pause" } else { "play" }
-                ),
-                // No length published (a stream, most browser tabs) means no honest
-                // progress to draw — the bare track says "playing, length unknown".
-                fraction: if m.has_progress { m.progress } else { 0.0 },
-                glyph: if m.playing { Glyph::Pause } else { Glyph::Play },
-                // Paused is a current fact, not an old reading — dimming it would
-                // say "this number may be wrong", which is not what is meant.
-                health: Health::Ok,
-                neutral: true,
-                action: Some(Action::PlayPause),
-            });
+            rings.push(media_ring(&m));
         }
 
         if let Ok(mut g) = shared.lock() {
@@ -248,6 +255,46 @@ fn worker(shared: Arc<Mutex<Shared>>) {
             g.media_bus = media_bus;
         }
         std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn media_ring(m: &media::Media) -> Ring {
+    Ring {
+        label: m.identity.clone(),
+        note: m.title.clone(),
+        rows: vec![Row {
+            label: if m.artist.is_empty() {
+                if m.playing { "Playing".into() } else { "Paused".into() }
+            } else {
+                m.artist.clone()
+            },
+            value: if m.has_progress { clock(m.position) } else { String::new() },
+            bar: Some(if m.has_progress { m.progress } else { 0.0 }),
+            note: if m.has_progress { clock(m.length) } else { "live".into() },
+        }],
+        // No length published (a stream, most browser tabs) means no honest progress
+        // to draw — the bare track says "playing, length unknown".
+        fraction: if m.has_progress { m.progress } else { 0.0 },
+        glyph: Glyph::Player {
+            desktop_entry: m.desktop_entry.clone(),
+            playing: m.playing,
+        },
+        // Paused is a current fact, not an old reading: dimming it would say "this
+        // number may be wrong", which is not what is meant.
+        health: Health::Ok,
+        neutral: true,
+        action: Some(Action::PlayPause),
+    }
+}
+
+/// Seconds as `m:ss`, or `h:mm:ss` past an hour.
+fn clock(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    let (h, m, s) = (s / 3600, (s % 3600) / 60, s % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
     }
 }
 
@@ -260,51 +307,87 @@ fn backoff(fails: u32) -> Duration {
 // ---------------------------------------------------------------------- UI
 
 fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offset: f64) {
-    let surface = surface::detect();
+    let surface: Rc<dyn surface::Surface> = surface::detect().into();
     eprintln!("linotch: surface = {}", surface.name());
 
     let win = gtk::ApplicationWindow::new(app);
     win.set_app_paintable(true);
     win.set_resizable(false);
-    // Without an ARGB visual the pill's corners come out black instead of clear.
+    // Without an ARGB visual the panel's corners come out black instead of clear.
     if let Some(v) = gtk::prelude::WidgetExt::screen(&win).and_then(|s| s.rgba_visual()) {
         win.set_visual(Some(&v));
     }
     surface.prepare(&win, edge, offset);
 
     let area = gtk::DrawingArea::new();
-    area.add_events(gdk::EventMask::BUTTON_PRESS_MASK | gdk::EventMask::POINTER_MOTION_MASK);
-    area.set_has_tooltip(true);
+    area.add_events(
+        gdk::EventMask::BUTTON_PRESS_MASK
+            | gdk::EventMask::POINTER_MOTION_MASK
+            | gdk::EventMask::LEAVE_NOTIFY_MASK,
+    );
     win.add(&area);
+
+    let hover: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
+    let shown = Rc::new(Cell::new((0usize, None::<usize>)));
 
     area.connect_draw({
         let shared = Arc::clone(&shared);
-        move |w, cr| {
+        let hover = Rc::clone(&hover);
+        move |_, cr| {
             let rings = shared.lock().map(|g| g.rings.clone()).unwrap_or_default();
-            let l = draw::layout(rings.len(), edge);
-            w.set_size_request(l.w as i32, l.h as i32);
-            draw::draw(cr, &rings, &l, edge);
+            let h = hover.get().filter(|i| *i < rings.len());
+            let l = draw::layout(&rings, edge, h);
+            draw::draw(cr, &rings, &l, edge, h);
             glib::Propagation::Stop
         }
     });
 
-    area.connect_query_tooltip({
+    area.connect_motion_notify_event({
         let shared = Arc::clone(&shared);
-        move |_, x, y, _keyboard, tip| {
+        let hover = Rc::clone(&hover);
+        let win = win.clone();
+        let area_ = area.clone();
+        let surface = Rc::clone(&surface);
+        let shown = Rc::clone(&shown);
+        move |_, ev| {
             let rings = shared.lock().map(|g| g.rings.clone()).unwrap_or_default();
-            let l = draw::layout(rings.len(), edge);
-            match draw::hit(&l, x as f64, y as f64).and_then(|i| rings.get(i)) {
-                Some(r) => {
-                    tip.set_text(Some(&format!("{}\n{}", r.label, r.detail)));
-                    true
-                }
-                None => false,
+            let current = hover.get();
+            let l = draw::layout(&rings, edge, current);
+            let (x, y) = ev.position();
+            let next = match draw::hit(&l, x, y) {
+                Some(i) => Some(i),
+                // Keep the card open while the pointer is inside it; otherwise
+                // moving towards the card would close it and shrink the window
+                // out from under the pointer.
+                None if l.card.map(|c| c.contains(x, y)).unwrap_or(false) => current,
+                None => None,
+            };
+            if next != current {
+                hover.set(next);
+                apply(&win, &area_, &*surface, &shared, &hover, &shown, edge, offset);
             }
+            glib::Propagation::Stop
+        }
+    });
+
+    area.connect_leave_notify_event({
+        let shared = Arc::clone(&shared);
+        let hover = Rc::clone(&hover);
+        let win = win.clone();
+        let area_ = area.clone();
+        let surface = Rc::clone(&surface);
+        let shown = Rc::clone(&shown);
+        move |_, _| {
+            if hover.replace(None).is_some() {
+                apply(&win, &area_, &*surface, &shared, &hover, &shown, edge, offset);
+            }
+            glib::Propagation::Stop
         }
     });
 
     area.connect_button_press_event({
         let shared = Arc::clone(&shared);
+        let hover = Rc::clone(&hover);
         let win = win.clone();
         move |_, ev| {
             let (x, y) = ev.position();
@@ -316,7 +399,7 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
                 Ok(g) => (g.rings.clone(), g.media_bus.clone()),
                 Err(_) => return glib::Propagation::Stop,
             };
-            let l = draw::layout(rings.len(), edge);
+            let l = draw::layout(&rings, edge, hover.get());
             if let Some(r) = draw::hit(&l, x, y).and_then(|i| rings.get(i)) {
                 if r.action == Some(Action::PlayPause) {
                     if let Some(bus) = bus {
@@ -331,33 +414,84 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
     });
 
     win.show_all();
-    surface.place(&win, edge, offset);
+    apply(&win, &area, &*surface, &shared, &hover, &shown, edge, offset);
 
     // One timer drives everything the UI needs: resize when the ring count changes,
     // repaint for the media progress arc. A second is plenty for both.
-    let mut shown = usize::MAX;
-    glib::timeout_add_local(Duration::from_secs(1), move || {
-        let n = shared.lock().map(|g| g.rings.len()).unwrap_or(0);
-        if n != shown {
-            shown = n;
-            if n == 0 {
-                // Nothing to say — an empty black pill is worse than no pill.
-                win.hide();
-            } else {
-                let l = draw::layout(n, edge);
-                area.set_size_request(l.w as i32, l.h as i32);
-                win.resize(l.w as i32, l.h as i32);
-                win.show();
-                surface.place(&win, edge, offset);
-            }
+    glib::timeout_add_local(Duration::from_secs(1), {
+        let win = win.clone();
+        let area = area.clone();
+        let surface = Rc::clone(&surface);
+        let shared = Arc::clone(&shared);
+        let hover = Rc::clone(&hover);
+        let shown = Rc::clone(&shown);
+        move || {
+            apply(&win, &area, &*surface, &shared, &hover, &shown, edge, offset);
+            area.queue_draw();
+            glib::ControlFlow::Continue
         }
-        area.queue_draw();
-        glib::ControlFlow::Continue
     });
+}
+
+/// Resize, re-anchor and re-shape the window for the current rings and hover, but
+/// only when one of those actually changed — `resize` on every tick makes the
+/// compositor re-map a layer surface once a second.
+#[allow(clippy::too_many_arguments)]
+fn apply(
+    win: &gtk::ApplicationWindow,
+    area: &gtk::DrawingArea,
+    surface: &dyn surface::Surface,
+    shared: &Arc<Mutex<Shared>>,
+    hover: &Rc<Cell<Option<usize>>>,
+    shown: &Rc<Cell<(usize, Option<usize>)>>,
+    edge: Edge,
+    offset: f64,
+) {
+    let rings = shared.lock().map(|g| g.rings.clone()).unwrap_or_default();
+    let h = hover.get().filter(|i| *i < rings.len());
+    let state = (rings.len(), h);
+    if shown.get() == state {
+        return;
+    }
+    shown.set(state);
+
+    if rings.is_empty() {
+        // Nothing to say — an empty panel is worse than no panel.
+        win.hide();
+        return;
+    }
+    let l = draw::layout(&rings, edge, h);
+    area.set_size_request(l.w as i32, l.h as i32);
+    win.resize(l.w as i32, l.h as i32);
+    win.show();
+    surface.place(win, edge, offset);
+    input_region(win, &l);
+    area.queue_draw();
+}
+
+/// Restrict pointer events to where the notch is actually painted. Without this the
+/// window's transparent parts — most of it once a card opens — swallow every click
+/// meant for the desktop behind them.
+fn input_region(win: &gtk::ApplicationWindow, l: &draw::Layout) {
+    let Some(gw) = win.window() else { return };
+    let to_rect = |r: draw::Rect| {
+        cairo::RectangleInt::new(r.x as i32, r.y as i32, r.w as i32, r.h as i32)
+    };
+    let region = cairo::Region::create_rectangle(&to_rect(l.rail));
+    if let Some(c) = l.card {
+        let _ = region.union_rectangle(&to_rect(c));
+    }
+    gw.input_shape_combine_region(&region, 0, 0);
 }
 
 fn menu(win: &gtk::ApplicationWindow) {
     let m = gtk::Menu::new();
+    let refresh = gtk::MenuItem::with_label("Refresh now");
+    refresh.connect_activate(|_| {
+        REFRESH.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    m.append(&refresh);
+    m.append(&gtk::SeparatorMenuItem::new());
     let quit = gtk::MenuItem::with_label("Quit linotch");
     quit.connect_activate({
         let win = win.clone();
@@ -380,5 +514,13 @@ mod tests {
         // Capped, and never panics however long the outage lasts.
         assert_eq!(backoff(4), BACKOFF_CAP);
         assert_eq!(backoff(u32::MAX), BACKOFF_CAP);
+    }
+
+    #[test]
+    fn clock_reads_like_a_player() {
+        assert_eq!(clock(0.0), "0:00");
+        assert_eq!(clock(74.0), "1:14");
+        assert_eq!(clock(3671.0), "1:01:11");
+        assert_eq!(clock(-5.0), "0:00");
     }
 }
