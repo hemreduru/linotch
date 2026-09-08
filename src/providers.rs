@@ -33,11 +33,15 @@ pub enum Error {
     /// sent, see `Claude::read`.
     Expired,
     /// A credential looked current but the vendor refused it anyway.
-    Rejected { code: u16 },
+    Rejected {
+        code: u16,
+    },
     /// HTTP 429. `retry_after` is the vendor's own Retry-After in seconds — it is
     /// routinely far longer than any backoff we would guess (half an hour, where
     /// our cap was fifteen minutes), and ignoring it just keeps the limit alive.
-    RateLimited { retry_after: Option<u64> },
+    RateLimited {
+        retry_after: Option<u64>,
+    },
     Other(String),
 }
 
@@ -49,7 +53,9 @@ impl std::fmt::Display for Error {
             Error::Rejected { code } => {
                 write!(f, "token rejected ({code}) — sign in with the tool itself")
             }
-            Error::RateLimited { retry_after: Some(s) } => {
+            Error::RateLimited {
+                retry_after: Some(s),
+            } => {
                 write!(f, "rate limited — retry {}", until(now_secs() + *s as i64))
             }
             Error::RateLimited { retry_after: None } => write!(f, "rate limited"),
@@ -101,7 +107,11 @@ fn parse_reset(v: Option<&Value>) -> Option<i64> {
     let v = v?;
     if let Some(n) = v.as_f64() {
         // Epoch milliseconds are the only way a "seconds" value lands past year 5000.
-        return Some(if n > 1e11 { (n / 1000.0) as i64 } else { n as i64 });
+        return Some(if n > 1e11 {
+            (n / 1000.0) as i64
+        } else {
+            n as i64
+        });
     }
     let s = v.as_str()?;
     chrono::DateTime::parse_from_rfc3339(s)
@@ -165,13 +175,13 @@ impl Claude {
             };
             // Newer Claude Code nests under claudeAiOauth; older wrote it flat.
             let oauth = v.get("claudeAiOauth").unwrap_or(&v);
-            if let Some(t) = oauth.get("accessToken").and_then(|x| x.as_str()) {
-                if !t.is_empty() {
-                    let expired = num(oauth.get("expiresAt"))
-                        .map(|ms| (ms as i64) <= now_ms())
-                        .unwrap_or(false);
-                    return Some((t.to_string(), expired));
-                }
+            if let Some(t) = oauth.get("accessToken").and_then(|x| x.as_str())
+                && !t.is_empty()
+            {
+                let expired = num(oauth.get("expiresAt"))
+                    .map(|ms| (ms as i64) <= now_ms())
+                    .unwrap_or(false);
+                return Some((t.to_string(), expired));
             }
         }
         None
@@ -315,7 +325,10 @@ impl Provider for Codex {
         let rl = v.get("rate_limit").unwrap_or(&v);
         let now = now_secs();
         let mut out = Vec::new();
-        for (label, key) in [("Session", "primary_window"), ("Weekly", "secondary_window")] {
+        for (label, key) in [
+            ("Session", "primary_window"),
+            ("Weekly", "secondary_window"),
+        ] {
             let Some(w) = rl.get(key) else { continue };
             let Some(pct) = num(w.get("used_percent")) else {
                 continue;
@@ -357,7 +370,10 @@ mod tests {
 
     #[test]
     fn reset_parsing_accepts_every_shape_the_vendors_send() {
-        assert_eq!(parse_reset(Some(&serde_json::json!(1790585719))), Some(1790585719));
+        assert_eq!(
+            parse_reset(Some(&serde_json::json!(1790585719))),
+            Some(1790585719)
+        );
         // milliseconds, as Anthropic's older payloads sent them
         assert_eq!(
             parse_reset(Some(&serde_json::json!(1790585719000i64))),

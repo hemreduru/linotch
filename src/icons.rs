@@ -30,7 +30,14 @@ thread_local! {
 }
 
 /// Paint an embedded brand mark centred on (cx, cy), `size` px wide, in `rgba`.
-pub fn brand(cr: &cairo::Context, name: &str, cx: f64, cy: f64, size: f64, rgba: (f64, f64, f64, f64)) {
+pub fn brand(
+    cr: &cairo::Context,
+    name: &str,
+    cx: f64,
+    cy: f64,
+    size: f64,
+    rgba: (f64, f64, f64, f64),
+) {
     MASKS.with(|c| {
         let mut c = c.borrow_mut();
         let key = match EMBEDDED.iter().find(|(n, _)| *n == name) {
@@ -72,9 +79,11 @@ pub fn app(cr: &cairo::Context, desktop_entry: &str, cx: f64, cy: f64, size: i32
     })
 }
 
+/// An icon's average colour, or `None` when it has no colour worth using.
+type Accent = Option<(f64, f64, f64)>;
+
 thread_local! {
-    static DOMINANT: RefCell<HashMap<String, Option<(f64, f64, f64)>>> =
-        RefCell::new(HashMap::new());
+    static DOMINANT: RefCell<HashMap<String, Accent>> = RefCell::new(HashMap::new());
 }
 
 /// The colour an application icon reads as, for the ring drawn around it.
@@ -83,14 +92,13 @@ thread_local! {
 /// and Chrome's icon is mostly white. Pixels are weighted by how saturated they
 /// are, so the ring picks up what the eye does: Spotify green, Firefox orange,
 /// VLC's traffic cone.
-pub fn dominant(desktop_entry: &str, size: i32) -> Option<(f64, f64, f64)> {
+pub fn dominant(desktop_entry: &str, size: i32) -> Accent {
     DOMINANT.with(|c| {
         *c.borrow_mut()
             .entry(desktop_entry.to_string())
             .or_insert_with(|| {
                 let p = lookup(desktop_entry, size)?;
-                let (w, h, stride, chans) =
-                    (p.width(), p.height(), p.rowstride(), p.n_channels());
+                let (w, h, stride, chans) = (p.width(), p.height(), p.rowstride(), p.n_channels());
                 if chans < 3 {
                     return None;
                 }
@@ -107,7 +115,11 @@ pub fn dominant(desktop_entry: &str, size: i32) -> Option<(f64, f64, f64)> {
                             bytes[i + 1] as f64 / 255.0,
                             bytes[i + 2] as f64 / 255.0,
                         );
-                        let alpha = if chans == 4 { bytes[i + 3] as f64 / 255.0 } else { 1.0 };
+                        let alpha = if chans == 4 {
+                            bytes[i + 3] as f64 / 255.0
+                        } else {
+                            1.0
+                        };
                         let max = r.max(g).max(b);
                         let min = r.min(g).min(b);
                         // Saturation x alpha: transparent padding and grey chrome
@@ -127,8 +139,16 @@ pub fn dominant(desktop_entry: &str, size: i32) -> Option<(f64, f64, f64)> {
                 let (r, g, b) = (sr / weight, sg / weight, sb / weight);
                 // Lift it clear of the black body, keeping the hue.
                 let max = r.max(g).max(b);
-                let lift = if max < 0.55 { 0.55 / max.max(0.01) } else { 1.0 };
-                Some(((r * lift).min(1.0), (g * lift).min(1.0), (b * lift).min(1.0)))
+                let lift = if max < 0.55 {
+                    0.55 / max.max(0.01)
+                } else {
+                    1.0
+                };
+                Some((
+                    (r * lift).min(1.0),
+                    (g * lift).min(1.0),
+                    (b * lift).min(1.0),
+                ))
             })
     })
 }

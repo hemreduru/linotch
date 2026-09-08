@@ -46,6 +46,37 @@ struct Shared {
     media_bus: Option<String>,
 }
 
+/// GNOME has no `wlr-layer-shell`, and Mutter lets no Wayland client place itself
+/// — but its XWayland honours an ordinary dock window perfectly well. So rather
+/// than degrade to a window the user has to position by hand, the process re-execs
+/// itself under XWayland and takes the X11 path, which is fully supported.
+///
+/// Skipped when the user has already chosen a backend, and guarded against looping.
+fn reexec_under_xwayland() {
+    use std::os::unix::process::CommandExt;
+    if std::env::var_os("LINOTCH_NO_REEXEC").is_some()
+        || std::env::var_os("GDK_BACKEND").is_some()
+        || std::env::var_os("WAYLAND_DISPLAY").is_none()
+    {
+        return;
+    }
+    // Answering this needs a display connection, so GTK comes up first. It is
+    // idempotent, and `Application::run` initialises it again in the new process.
+    if gtk::init().is_err() || gtk_layer_shell::is_supported() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    eprintln!("linotch: no wlr-layer-shell on this compositor — restarting under XWayland");
+    let err = std::process::Command::new(exe)
+        .args(std::env::args().skip(1))
+        .env("GDK_BACKEND", "x11")
+        .env("LINOTCH_NO_REEXEC", "1")
+        .exec();
+    eprintln!("linotch: could not restart under XWayland ({err}); continuing unplaced");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -60,8 +91,12 @@ fn main() {
         None => {}
     }
 
+    reexec_under_xwayland();
     let (edge, offset) = config::Config::load();
-    if let Some(o) = std::env::var("LINOTCH_OPACITY").ok().and_then(|s| s.parse().ok()) {
+    if let Some(o) = std::env::var("LINOTCH_OPACITY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         draw::set_opacity(o);
     }
 
@@ -92,7 +127,8 @@ ENVIRONMENT:
     LINOTCH_EDGE=right|left|top|bottom   screen edge to hug        (default: right)
     LINOTCH_OFFSET=0.0..1.0              position along that edge  (default: 0.5)
     LINOTCH_OPACITY=0.35..1.0            panel opacity             (default: 1.0)
-    LINOTCH_SURFACE=layer|x11|floating   override display-server detection",
+    LINOTCH_SURFACE=layer|x11|floating   override display-server detection
+    LINOTCH_NO_REEXEC=1                  do not fall back to XWayland (GNOME)",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -123,7 +159,12 @@ fn check() {
                         .resets_at
                         .map(providers::until)
                         .unwrap_or_else(|| "?".into());
-                    println!("         {:16} {:5.1}%  resets {}", w.label, w.used * 100.0, when);
+                    println!(
+                        "         {:16} {:5.1}%  resets {}",
+                        w.label,
+                        w.used * 100.0,
+                        when
+                    );
                 }
             }
             Err(e) => println!("{:8} {e}", p.label()),
@@ -232,9 +273,9 @@ fn worker(shared: Arc<Mutex<Shared>>) {
                     // our backoff — asking again before it expires is what keeps a
                     // rate limit alive instead of letting it lapse.
                     let wait = match e {
-                        providers::Error::RateLimited { retry_after: Some(s) } => {
-                            Duration::from_secs(s).max(backoff(1))
-                        }
+                        providers::Error::RateLimited {
+                            retry_after: Some(s),
+                        } => Duration::from_secs(s).max(backoff(1)),
                         _ => backoff(s.fails),
                     };
                     s.ring.note = if s.ring.rows.is_empty() {
@@ -265,11 +306,19 @@ fn worker(shared: Arc<Mutex<Shared>>) {
 fn media_ring(m: &media::Media) -> Ring {
     Ring {
         label: m.identity.clone(),
-        percent: if m.has_progress { clock(m.position) } else { String::new() },
+        percent: if m.has_progress {
+            clock(m.position)
+        } else {
+            String::new()
+        },
         note: m.title.clone(),
         rows: vec![Row {
             label: if m.artist.is_empty() {
-                if m.playing { "Playing".into() } else { "Paused".into() }
+                if m.playing {
+                    "Playing".into()
+                } else {
+                    "Paused".into()
+                }
             } else {
                 m.artist.clone()
             },
@@ -279,7 +328,11 @@ fn media_ring(m: &media::Media) -> Ring {
                 "Live".into()
             },
             bar: Some(if m.has_progress { m.progress } else { 0.0 }),
-            note: if m.playing { "Playing".into() } else { "Paused".into() },
+            note: if m.playing {
+                "Playing".into()
+            } else {
+                "Paused".into()
+            },
         }],
         // No length published (a stream, most browser tabs) means no honest progress
         // to draw — the bare track says "playing, length unknown".
@@ -323,6 +376,10 @@ const FRAME: Duration = Duration::from_millis(16);
 /// click. Below this a shaky click on the media ring would start dragging.
 const DRAG_SLOP: f64 = 4.0;
 
+/// What `apply` last put on screen: the window size, and the panel rectangle
+/// inside it (x, y, w, h).
+type Applied = ((i32, i32), Option<(i32, i32, i32, i32)>);
+
 struct Drag {
     /// Where in the window the press landed, along the rail's axis.
     grab: (f64, f64),
@@ -348,7 +405,7 @@ struct Ui {
     /// second, and the input region has to follow the panel even when the window
     /// size does not change — a menu and a card are different rectangles inside
     /// the same window, and a stale region makes the larger of the two unclickable.
-    shown: ((i32, i32), Option<(i32, i32, i32, i32)>),
+    shown: Applied,
 }
 
 impl Ui {
@@ -452,7 +509,8 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
             let l = draw::layout(&rings, u.edge, u.drawn());
             // A menu stays until it is used or the pointer leaves; hovering rings
             // under an open menu would swap it for a card mid-click.
-            let menu_open = matches!(u.panel.map(|o| o.kind), Some(draw::Kind::Menu)) && u.target > 0.0;
+            let menu_open =
+                matches!(u.panel.map(|o| o.kind), Some(draw::Kind::Menu)) && u.target > 0.0;
             if menu_open {
                 let hot = l.panel.and_then(|r| draw::menu_hit(r, x, y));
                 if hot != u.hot {
@@ -463,7 +521,10 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
             }
 
             let next = match draw::hit(&l, u.edge, x, y) {
-                Some(i) => Some(draw::Open { ring: i, kind: draw::Kind::Card }),
+                Some(i) => Some(draw::Open {
+                    ring: i,
+                    kind: draw::Kind::Card,
+                }),
                 // Keep it open while the pointer is inside the panel it opened.
                 None if l.panel.map(|r| r.contains(x, y)).unwrap_or(false) => u.panel,
                 None => None,
@@ -510,7 +571,10 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
 
             if ev.button() == 3 {
                 let ring = draw::hit(&l, u.edge, x, y).unwrap_or(0);
-                u.open(draw::Open { ring, kind: draw::Kind::Menu });
+                u.open(draw::Open {
+                    ring,
+                    kind: draw::Kind::Menu,
+                });
                 drop(u);
                 ctx.animate();
                 return glib::Propagation::Stop;
@@ -534,7 +598,10 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
             // not haul the notch across the screen — the card is something you
             // read, and the pointer travels over it constantly.
             if l.rail.contains(x, y) {
-                u.drag = Some(Drag { grab: (x, y), moved: false });
+                u.drag = Some(Drag {
+                    grab: (x, y),
+                    moved: false,
+                });
             }
             glib::Propagation::Stop
         }
@@ -561,12 +628,11 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
                 .and_then(|i| rings.get(i))
                 .and_then(|r| r.action);
             drop(u);
-            if action == Some(Action::PlayPause) {
-                if let Some(bus) = bus {
-                    if let Err(e) = media::play_pause(&bus) {
-                        eprintln!("linotch: play/pause failed: {e}");
-                    }
-                }
+            if action == Some(Action::PlayPause)
+                && let Some(bus) = bus
+                && let Err(e) = media::play_pause(&bus)
+            {
+                eprintln!("linotch: play/pause failed: {e}");
             }
             glib::Propagation::Stop
         }
@@ -614,7 +680,10 @@ impl Ctx {
     }
 
     fn rings(&self) -> Vec<Ring> {
-        self.shared.lock().map(|g| g.rings.clone()).unwrap_or_default()
+        self.shared
+            .lock()
+            .map(|g| g.rings.clone())
+            .unwrap_or_default()
     }
 
     /// Start the 60 Hz spring timer, unless one is already running.
@@ -671,7 +740,7 @@ impl Ctx {
             // one — so it is asked for as rarely as possible.
             let along = |s: (i32, i32)| if edge.vertical() { s.1 } else { s.0 };
             if along(was.0) != along(size) {
-                self.surface.place(&self.win, edge, offset);
+                self.surface.place(&self.win, edge, offset, size);
             }
         }
         input_region(&self.win, &l);
@@ -689,12 +758,23 @@ impl Ctx {
             (u.edge, u.offset)
         };
         let l = draw::layout(&self.rings(), edge, None);
-        let (span, own) = if edge.vertical() { (mh, l.h) } else { (mw, l.w) };
+        let (span, own) = if edge.vertical() {
+            (mh, l.h)
+        } else {
+            (mw, l.w)
+        };
         let lead = (span * offset - own / 2.0).clamp(0.0, (span - own).max(0.0));
         let (px, py) = if edge.vertical() {
             (if edge == Edge::Right { mw - l.w + x } else { x }, lead + y)
         } else {
-            (lead + x, if edge == Edge::Bottom { mh - l.h + y } else { y })
+            (
+                lead + x,
+                if edge == Edge::Bottom {
+                    mh - l.h + y
+                } else {
+                    y
+                },
+            )
         };
         Some((px, py, mw, mh))
     }
@@ -736,7 +816,9 @@ impl Ctx {
             self.apply();
         }
 
-        let Some((px, py, mw, mh)) = self.pointer_on_screen(x, y) else { return };
+        let Some((px, py, mw, mh)) = self.pointer_on_screen(x, y) else {
+            return;
+        };
         let near = edge_for(px, py, mw, mh, edge);
         if near != edge {
             let mut u = self.ui.borrow_mut();
@@ -748,16 +830,17 @@ impl Ctx {
             if let Some(d) = u.drag.as_mut() {
                 d.grab = (x, y);
             }
-            let (e, o) = (u.edge, u.offset);
+            let e = u.edge;
             drop(u);
             self.surface.set_edge(&self.win, e);
             self.apply();
-            self.surface.place(&self.win, e, o);
             self.area.queue_draw();
             return;
         }
 
-        let Some(mon) = surface::monitor_geometry(&self.win) else { return };
+        let Some(mon) = surface::monitor_geometry(&self.win) else {
+            return;
+        };
         let (span, along, grab_along) = if edge.vertical() {
             (mon.height() as f64, y, grab.1)
         } else {
@@ -767,8 +850,9 @@ impl Ctx {
         let mut u = self.ui.borrow_mut();
         u.offset = (offset + (along - grab_along) / span).clamp(0.0, 1.0);
         let (e, o) = (u.edge, u.offset);
+        let size = u.shown.0;
         drop(u);
-        self.surface.place(&self.win, e, o);
+        self.surface.place(&self.win, e, o, size);
         self.area.queue_draw();
     }
 }
@@ -809,9 +893,8 @@ fn edge_for(px: f64, py: f64, mw: f64, mh: f64, current: Edge) -> Edge {
 /// meant for the desktop behind them.
 fn input_region(win: &gtk::ApplicationWindow, l: &draw::Layout) {
     let Some(gw) = win.window() else { return };
-    let to_rect = |r: draw::Rect| {
-        cairo::RectangleInt::new(r.x as i32, r.y as i32, r.w as i32, r.h as i32)
-    };
+    let to_rect =
+        |r: draw::Rect| cairo::RectangleInt::new(r.x as i32, r.y as i32, r.w as i32, r.h as i32);
     let region = cairo::Region::create_rectangle(&to_rect(l.rail));
     if let Some(c) = l.panel {
         let _ = region.union_rectangle(&to_rect(c));

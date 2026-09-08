@@ -19,8 +19,8 @@
 //! `place` runs after it is shown and again on every monitor change, which is where
 //! a server that needs explicit coordinates does its work.
 
-use gtk::prelude::*;
 use gtk::gdk;
+use gtk::prelude::*;
 
 /// Which screen edge the notch hugs.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,8 +69,13 @@ pub trait Surface {
     fn set_edge(&self, _w: &gtk::ApplicationWindow, _edge: Edge) {}
 
     /// After the window is shown, and on monitor changes. For servers that place by
-    /// coordinate. A compositor-anchored surface leaves this empty.
-    fn place(&self, _w: &gtk::ApplicationWindow, _edge: Edge, _offset: f64) {}
+    /// coordinate.
+    ///
+    /// `size` is passed in rather than read back from the window: right after a
+    /// resize `GtkWindow::size` still reports the old one — GTK's default 200x200 on
+    /// the first call — and placing against that puts the notch a hundred pixels
+    /// short of the bezel.
+    fn place(&self, _w: &gtk::ApplicationWindow, _edge: Edge, _offset: f64, _size: (i32, i32)) {}
 }
 
 // ---------------------------------------------------------------- layer shell
@@ -136,10 +141,12 @@ impl Surface for LayerShell {
     /// layer-shell has no coordinates, so `offset` becomes a margin — and a margin
     /// positions the window's *leading edge*, not its centre. Subtracting half the
     /// window keeps 0.5 meaning centred, which is what it looks like it means.
-    fn place(&self, w: &gtk::ApplicationWindow, edge: Edge, offset: f64) {
+    fn place(&self, w: &gtk::ApplicationWindow, edge: Edge, offset: f64, size: (i32, i32)) {
         use gtk_layer_shell::LayerShell as _;
-        let Some(mon) = monitor_geometry(w) else { return };
-        let (ww, wh) = w.size();
+        let Some(mon) = monitor_geometry(w) else {
+            return;
+        };
+        let (ww, wh) = size;
         let (span, own) = if edge.vertical() {
             (mon.height(), wh)
         } else {
@@ -179,9 +186,9 @@ impl Surface for X11Dock {
         w.stick(); // present on every virtual desktop
     }
 
-    fn place(&self, w: &gtk::ApplicationWindow, edge: Edge, offset: f64) {
+    fn place(&self, w: &gtk::ApplicationWindow, edge: Edge, offset: f64, size: (i32, i32)) {
         let Some(g) = monitor_geometry(w) else { return };
-        let (ww, wh) = w.size();
+        let (ww, wh) = size;
         let off = offset.clamp(0.0, 1.0);
         let (x, y) = match edge {
             Edge::Left => (g.x(), g.y() + ((g.height() - wh) as f64 * off) as i32),
@@ -196,6 +203,10 @@ impl Surface for X11Dock {
             ),
         };
         w.move_(x, y);
+        // Re-asserted after the window is realized: set before that, there is no X
+        // window to hang the hints on yet.
+        w.set_keep_above(true);
+        w.stick();
     }
 }
 

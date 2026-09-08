@@ -1,120 +1,117 @@
+<div align="center">
+
 # linotch
 
-A small pill on the edge of your screen: one ring per coding assistant showing how
-much of its limit you have burned, and one for whatever is playing — which is also
-the play/pause button.
+**A usage notch for Linux.** One ring per AI coding assistant showing how much of
+your limit is gone, plus one for whatever is playing — pinned to the edge of your
+screen, on Wayland or X11.
 
-<p align="center"><img src="docs/preview.png" alt="The notch, shut and with a card open" width="478"></p>
-<p align="center"><sub>Shut, with a ring hovered, and with the right-click menu open. Sample data.</sub></p>
+[![CI](https://github.com/hemreduru/linotch/actions/workflows/ci.yml/badge.svg)](https://github.com/hemreduru/linotch/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+![Platform: Linux](https://img.shields.io/badge/platform-Linux-informational)
+![Wayland + X11](https://img.shields.io/badge/Wayland-%2B%20X11-blue)
+![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 
-Linux only, and Wayland-first: the notch is a real `wlr-layer-shell` surface, not a
-window nudged into place. It signs in nowhere — every reading is borrowed from a
-credential a tool on your machine already holds.
+<img src="docs/preview.png" alt="linotch on the right edge of the screen: rings for Claude and Codex usage and a media player, a hover card showing limit windows, and the right-click menu" width="731">
 
-## What it shows
+<sub>Shut, with a ring hovered, and with the menu open. Sample data.</sub>
 
-| Ring | Source | How |
-|---|---|---|
-| **Claude** | Claude Code's OAuth token in `~/.claude/.credentials.json` | `api.anthropic.com/api/oauth/usage` — the same session and weekly windows `/usage` reports |
-| **Codex** | The ChatGPT session in `~/.codex/auth.json` | `chatgpt.com/backend-api/wham/usage` — 5-hour and weekly windows |
-| **Media** | Any MPRIS player on the session bus | Track progress; click to play/pause |
+</div>
 
-A ring appears only when that tool is installed *and* signed in. The arc shows the
-window closest to its limit — the one that will actually stop you. Hovering opens a
-card beside it with every window, its own colour grade, and when it resets.
+---
 
-Each ring carries its provider's own mark, in that provider's own colour, with its
-percentage underneath. The media ring carries the player's application icon and the
-track position, and takes its arc colour *from that icon* — weighted by saturation,
-so it picks up what the eye does rather than averaging to grey. Anything with no
-colour of its own falls back to the app's orange.
+## What it is
 
-Nothing is ever invented: when a vendor stops answering, the last reading stays,
-dimmed, and the card says why it is old. A rejected token says so, and says that
-using the tool once will refresh it. A rate limit is waited out for exactly as long
-as the vendor's own `Retry-After` asks — asking again early is what keeps a limit
-alive instead of letting it lapse.
+linotch is a small always-on-top panel — a "notch" — that answers one question at a
+glance: **how much of my AI coding assistant's usage limit is left?** It reads
+Claude Code and Codex usage directly from the vendors' own endpoints, using the
+credentials those tools already keep on your machine, and draws one colour-graded
+ring per account.
 
-Media works with anything that speaks MPRIS — Spotify, VLC, mpv, Firefox, Chromium,
-KDE's browser integration — because that is the interface the desktop's own media
-controls use. No helper binary, no per-player code.
+It also shows what is playing, via MPRIS, and the media ring doubles as a
+play/pause button.
 
-## Display servers
+It signs in nowhere, stores no secret, sends nothing anywhere, and has no telemetry.
 
-The one genuinely per-environment part lives behind a trait in
-[`src/surface.rs`](src/surface.rs).
+## Features
 
-| Surface | Environments | Mechanism |
-|---|---|---|
-| `LayerShell` | KDE/KWin, Hyprland, sway, wayfire, river, labwc | `zwlr_layer_shell_v1`, Overlay layer |
-| `X11Dock` | any X11 session — KDE X11, XFCE, i3, Cinnamon, MATE | `_NET_WM_WINDOW_TYPE_DOCK`, kept above, moved by coordinate |
-| `Floating` | Wayland without layer-shell — GNOME/Mutter | a plain window; Mutter lets no client place itself, so this degrades honestly rather than failing silently |
-
-Detection is automatic. To override it:
-
-```bash
-LINOTCH_SURFACE=x11 linotch
-```
-
-**Adding an environment**: write a struct, `impl Surface` for it, add one arm to
-`detect()`. `prepare()` runs before the window is realized, `place()` after it is
-shown and on every size change. Nothing else in the codebase needs to know.
+- **Claude Code usage** — session and weekly limits, from `api.anthropic.com`, the
+  same windows `/usage` reports.
+- **Codex / ChatGPT usage** — 5-hour and weekly windows from the ChatGPT backend.
+- **Media control** — any MPRIS player (Spotify, VLC, mpv, Firefox, Chromium, KDE's
+  browser integration). Track progress on the ring, click to play/pause.
+- **Wayland-native** — a real `wlr-layer-shell` surface, not a window nudged into
+  place. Falls back to an X11 dock where layer-shell is missing.
+- **Drag it anywhere** — press and drag; it snaps to whichever screen edge you take
+  it to and remembers where you left it.
+- **Honest about failure** — a stale reading stays dimmed and says why; a rate limit
+  is waited out for exactly as long as the vendor's `Retry-After` asks.
+- **Light** — a ~4 MB binary, no daemon, no web view, no Electron.
 
 ## Install
 
-Needs GTK 3, gtk-layer-shell and a Rust toolchain.
+### Arch Linux / CachyOS / EndeavourOS
 
 ```bash
-sudo pacman -S --needed gtk3 gtk-layer-shell rust     # Arch / CachyOS
-# Debian/Ubuntu: libgtk-3-dev libgtk-layer-shell-dev
+sudo pacman -S --needed gtk3 gtk-layer-shell rust
+git clone https://github.com/hemreduru/linotch && cd linotch
+cargo build --release
+install -Dm755 target/release/linotch ~/.local/bin/linotch
+install -Dm644 linotch.desktop ~/.config/autostart/linotch.desktop
+linotch &
 ```
 
+A [`PKGBUILD`](PKGBUILD) is included if you would rather `makepkg -si`.
+
+### Debian / Ubuntu / Pop!_OS / Mint
+
 ```bash
+sudo apt install -y libgtk-3-dev libgtk-layer-shell-dev cargo
+git clone https://github.com/hemreduru/linotch && cd linotch
+cargo build --release
+install -Dm755 target/release/linotch ~/.local/bin/linotch
+install -Dm644 linotch.desktop ~/.config/autostart/linotch.desktop
+linotch &
+```
+
+### Fedora / Nobara
+
+```bash
+sudo dnf install -y gtk3-devel gtk-layer-shell-devel cargo
+git clone https://github.com/hemreduru/linotch && cd linotch
 cargo build --release
 install -Dm755 target/release/linotch ~/.local/bin/linotch
 ```
 
-Start it with your session:
+### Prebuilt binary
+
+Each [release](https://github.com/hemreduru/linotch/releases) ships an
+`x86_64-linux` tarball with a `sha256`. You still need `gtk3` and `gtk-layer-shell`
+installed — every distro has both.
+
+## Desktop support
+
+| Desktop / compositor | Session | How it attaches | Status |
+|---|---|---|---|
+| **KDE Plasma** | Wayland | `wlr-layer-shell`, overlay layer | ✅ tested |
+| **KDE Plasma** | X11 / XWayland | `_NET_WM_WINDOW_TYPE_DOCK` | ✅ tested |
+| **Hyprland, sway, river, wayfire, labwc** | Wayland | `wlr-layer-shell` | ✅ supported |
+| **GNOME** | Wayland | auto-restarts under XWayland, then X11 dock | ✅ supported |
+| **XFCE, i3, Cinnamon, MATE, LXQt** | X11 | `_NET_WM_WINDOW_TYPE_DOCK` | ✅ supported |
+
+**On GNOME**, Mutter implements no layer-shell and lets no Wayland client place
+itself. linotch detects that and re-executes itself under XWayland, where an
+ordinary dock window works properly. Nothing to configure. Set `LINOTCH_NO_REEXEC=1`
+if you would rather it did not.
+
+## Usage
+
+Hover a ring to open its card. Click the media ring to play/pause. Right-click the
+body for the menu. Press and drag the body to move it.
 
 ```bash
-install -Dm644 linotch.desktop ~/.config/autostart/linotch.desktop
-```
-
-## Use
-
-Hover a ring for its card. Click the media ring to play/pause. Right-click anywhere
-on the notch for the menu.
-
-**Drag it.** Press and hold on the notch's body and move: it slides along its edge
-and crosses to another when the pointer does, so it goes where you take it instead
-of teleporting when you let go. Pressing inside an open card does nothing — that is
-something you read.
-
-Two things keep the edge from flickering. Distances are measured in halves of the
-screen rather than pixels, so the middle of a 16:9 display is not "near the top";
-and the edge it is already on keeps it unless another is *clearly* nearer, so the
-diagonals are not a knife edge. Moving edges re-creates the surface rather than
-re-anchoring it, because KWin reads a layer surface's anchor when it is created and
-a live change left the notch attached to nothing at all.
-
-Where it ends up is saved to `~/.config/linotch/config.json` and restored on the
-next start. `LINOTCH_EDGE` / `LINOTCH_OFFSET` still win when set, so a one-off
-override does not overwrite what you placed by hand.
-
-Cards and the menu open *inward*, away from the bezel — leftwards from a right-edge
-notch, downwards from a top one — and they grow out of the tail on a spring that
-overshoots slightly, so a panel reads as coming out of the notch rather than
-appearing beside it. The menu is drawn in the same skin for the same reason: GTK's
-own menu is a separate window, and a Wayland compositor puts that in the middle of
-the screen, nowhere near what was clicked.
-
-Usage is re-read every three minutes. That is deliberate: a limit window does not
-move fast enough to be worth a per-minute poll, and the vendors answer a burst with
-a Retry-After measured in half hours. "Refresh now" in the right-click menu skips
-the wait.
-
-```bash
-linotch --check      # what each source reports, and why one is missing
+linotch            # run it
+linotch --check    # what each source reports, and why one is missing
 linotch --help
 ```
 
@@ -124,76 +121,127 @@ linotch --help
 | `LINOTCH_OFFSET` | `0.5` | position along that edge, `0.0`–`1.0` |
 | `LINOTCH_OPACITY` | `1.0` | panel opacity, `0.35`–`1.0` |
 | `LINOTCH_SURFACE` | auto | `layer`, `x11`, `floating` |
+| `LINOTCH_NO_REEXEC` | — | stay on Wayland even without layer-shell |
 
-The notch is solid black by default, as upstream's is. `LINOTCH_OPACITY=0.8` makes
-it translucent — not blurred: blurring behind a surface needs the compositor's own
-protocol (`org_kde_kwin_blur` on KWin, nothing portable), and no client can do it
-for itself. Opacity is the part that is honest everywhere.
+Where you drag it is saved to `~/.config/linotch/config.json`. The environment
+variables win when set, so a one-off override never overwrites what you placed.
+
+<div align="center">
+<img src="docs/live.png" alt="linotch running on KDE Plasma Wayland, showing a Claude usage ring at 19%" width="180">
+<br><sub>Running on KDE Plasma (Wayland).</sub>
+</div>
+
+## FAQ
+
+**Does it need my API key?**
+No. It never asks for one and never stores a credential. It reads the token Claude
+Code already wrote to `~/.claude/.credentials.json`, and the ChatGPT session Codex
+keeps in `~/.codex/auth.json`, and asks each vendor's own usage endpoint. Nothing
+leaves your machine except those two requests, to vendors you are already signed in
+to.
+
+**The Claude ring says "token expired".**
+`~/.claude/.credentials.json` is written by the Claude Code **CLI**. If you only use
+Claude Code inside the desktop app, that file is never refreshed and its token goes
+stale. Run `claude` in a terminal once and the ring fills in. linotch deliberately
+does not refresh it itself — it borrows credentials, it does not manage them.
+
+**A ring is missing.**
+Run `linotch --check`; it prints, per source, whether the tool is installed, signed
+in, rate limited, or answering fine. A ring is drawn only for a tool that is both
+installed and signed in.
+
+**Does it work on GNOME?**
+Yes — see the table above. It restarts itself under XWayland automatically, because
+Mutter supports no protocol that would let a client place itself on Wayland.
+
+**Does it work with multiple monitors?**
+It attaches to the monitor the compositor puts it on and follows that monitor's
+geometry. Drag it to move it.
+
+**How often does it poll?**
+Every three minutes, and it honours `Retry-After` on a rate limit. A limit window
+does not move fast enough to be worth a per-minute poll. "Refresh now" in the
+right-click menu skips the wait.
+
+**Does it support Cursor / Copilot / Gemini / OpenCode?**
+Not yet. The provider interface is one trait with four methods — see
+[Adding a provider](#adding-a-provider). PRs welcome.
+
+**Why not a Waybar or Polybar module?**
+Those are bars; this is a notch that opens a card, controls media, and moves where
+you drag it. If you already live in Waybar, its custom-module support may suit you
+better — `linotch --check` output is easy to parse.
+
+## Adding a provider
+
+Implement `Provider` in [`src/providers.rs`](src/providers.rs) and add it to `all()`:
+
+```rust
+impl Provider for MyTool {
+    fn label(&self) -> &'static str { "MyTool" }
+    fn asset(&self) -> &'static str { "mytool" }   // assets/mytool.png
+    fn present(&self) -> bool { /* cheap, offline */ }
+    fn read(&self) -> Result<Vec<Window>, Error> { /* one HTTP call */ }
+}
+```
+
+Two rules the existing ones follow:
+
+- **Borrow, never manage.** Read the credential the tool already wrote; never
+  refresh it, never write it back. A 401 is not an error to fix here.
+- **Never invent a number.** Return an error and let the last reading go stale
+  rather than showing a zero that looks like a reading.
+
+## Adding a desktop environment
+
+The one genuinely per-display-server part lives behind a trait in
+[`src/surface.rs`](src/surface.rs): write a struct, `impl Surface`, add one arm to
+`detect()`. `prepare()` runs before the window is realized, `set_edge()` moves it
+between edges, `place()` positions it along one. Nothing else in the codebase needs
+to know.
 
 ## Design
 
-The look is codenotch's, taken from its source rather than eyeballed from its
-screenshots. Upstream measured every distance off a 2000×2000 design frame and
-anchored the scale on one value — the provider ring is 44pt across and 117px in the
-frame — so [`src/draw.rs`](src/draw.rs) reproduces the same ratios from the same
-numbers, and the palette (`#00FF88` / `#F2FF00` / `#FF3F00`, `#303030` track,
-`#808080` secondary text) is upstream's sampled values. One number differs: the
-whole scale is multiplied by 0.85, because upstream is sized to sit in a Mac's menu
-bar and reads as too big on a desktop screen.
+The look is [codenotch](https://github.com/vinzdg/codenotch)'s, taken from its
+source rather than eyeballed from screenshots. Upstream measured every distance off
+a 2000×2000 design frame and anchored the scale on one value — the provider ring is
+44 pt across and 117 px in the frame — so [`src/draw.rs`](src/draw.rs) reproduces
+the same ratios from the same numbers, and the palette (`#00FF88` / `#F2FF00` /
+`#FF3F00`, `#303030` track, `#808080` secondary text) is upstream's sampled values.
+One number differs: the whole scale is multiplied by 0.85, because upstream is sized
+to sit in a Mac's menu bar.
 
 That includes the parts that carry the character: the inverse-rounded flares where
 the body meets the bezel, the thin progress arc riding down the middle of the thick
 track, the percentage under each ring, and the tail on the hover card.
 
-On a top or bottom edge the body is thicker, because a percentage that sits *below*
-its ring costs length when the rings are stacked and depth when they are in a row.
-Sizing both the same is what clipped the percentages off a horizontal notch.
+Provider marks are drawn in their own brand colours; the media ring takes its colour
+from the player's application icon, weighted by saturation so it picks up what the
+eye does rather than averaging to grey.
 
-One thing is deliberately different. codenotch draws the card in a second window;
-linotch has a single surface, so the card lives inside it. A layer-shell surface is
-anchored by its centre along its edge, which means any change to the window's
-*length* moves the rail by half of it — so the length is computed from the tallest
-card any ring could open, hovered or not, and only the depth changes when a card
-opens. Without that the rail slides up and down as the pointer crosses the rings.
+## Building and contributing
 
-## When a ring is missing
+```bash
+cargo test                        # geometry, parsing, backoff, edge snapping
+cargo test -- --ignored preview   # renders docs/preview.png
+cargo clippy --all-targets
+```
 
-`linotch --check` says why, per source. The usual answers:
-
-- **`token expired — run \`claude\` once to refresh it`** — `~/.claude/.credentials.json`
-  is written by the Claude Code **CLI**. If you only ever use Claude Code inside the
-  desktop app, that file is never refreshed and its access token goes stale within
-  hours. Running `claude` in a terminal once rewrites it. linotch deliberately does
-  not refresh it itself: it borrows credentials, it does not manage them.
-- **`rate limited — retry in …`** — the vendor's own `Retry-After`, waited out in
-  full. Repeated failed auth is what earns one, which is why a token already known
-  to be expired is never sent.
-- **`not installed`** — no credential file for that tool on this machine.
-
-## Adding a provider
-
-Implement `Provider` in [`src/providers.rs`](src/providers.rs) and add it to `all()`.
-`present()` must be cheap and offline — it decides whether a ring is drawn at all,
-before any network call. Two rules the existing ones follow:
-
-- **Borrow, never manage.** Read the credential the tool already wrote; never refresh
-  it, never write it back. A 401 is not an error to fix here, it is the tool's job.
-- **Never invent a number.** Return an error and let the last reading go stale rather
-  than showing a zero that looks like a reading.
+CI runs `fmt`, `clippy -D warnings`, the tests and a release build on every push.
+Issues and PRs welcome — especially new providers and new desktop environments.
 
 ## Credits
 
-Provider marks are from [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT) —
-see [`assets/NOTICE.md`](assets/NOTICE.md). They remain the trademarks of their
-owners.
-
-The idea, the design, and the provider wire formats all come from
-[vinzdg/codenotch](https://github.com/vinzdg/codenotch) (MIT) — a macOS app with a
-Windows port. This is a separate Linux implementation rather than a fork: no code is
-shared, and the surface layer, the drawing, the media ring and the providers are
-written for GTK/Wayland. What *is* shared is the design, on purpose and with its
-numbers taken from upstream's own source.
+- Design and provider wire formats: [vinzdg/codenotch](https://github.com/vinzdg/codenotch) (MIT) — a macOS app with a Windows port. linotch is a separate Linux implementation, not a fork; no code is shared.
+- Provider marks: [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT) — see [`assets/NOTICE.md`](assets/NOTICE.md). The marks remain the trademarks of their owners.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
+
+---
+
+<sub>Keywords: Claude Code usage monitor for Linux · Codex usage tracker · AI coding
+assistant limit widget · Wayland layer-shell panel · KDE Plasma notch · GNOME dock
+widget · MPRIS media controls · Rust GTK desktop applet</sub>

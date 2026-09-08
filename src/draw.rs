@@ -192,7 +192,11 @@ fn rail_depth(edge: Edge) -> f64 {
 /// How much of the edge one cell takes up — the whole cell when stacked, just the
 /// ring when laid out in a row.
 fn along_extent(edge: Edge) -> f64 {
-    if edge.vertical() { cell_extent() } else { RING_D }
+    if edge.vertical() {
+        cell_extent()
+    } else {
+        RING_D
+    }
 }
 
 fn rail_run(n: usize, edge: Edge) -> f64 {
@@ -209,7 +213,10 @@ fn panel_size(rings: &[Ring], open: Open) -> (f64, f64) {
         Kind::Menu => (MENU_W, menu_height()),
         Kind::Card => (
             CARD_W,
-            rings.get(open.ring).map(card_height).unwrap_or(menu_height()),
+            rings
+                .get(open.ring)
+                .map(card_height)
+                .unwrap_or(menu_height()),
         ),
     }
 }
@@ -233,7 +240,11 @@ fn card_height(ring: &Ring) -> f64 {
     } else {
         HEADER_TO_BLOCK + line(FONT_BODY)
     };
-    let body = if blocks > 0.0 { HEADER_TO_BLOCK + blocks } else { 0.0 };
+    let body = if blocks > 0.0 {
+        HEADER_TO_BLOCK + blocks
+    } else {
+        0.0
+    };
     2.0 * CARD_PAD + line(FONT_TITLE) + note + body
 }
 
@@ -250,14 +261,43 @@ pub fn layout(rings: &[Ring], edge: Edge, open: Option<Open>) -> Layout {
     let run = rail_run(rings.len(), edge)
         .max(rings.iter().map(card_height).fold(0.0_f64, f64::max))
         .max(menu_height());
-    let depth = thick + if open.is_some() { widest_panel() + TAIL_LEN + TAIL_GAP } else { 0.0 };
+    let depth = thick
+        + if open.is_some() {
+            widest_panel() + TAIL_LEN + TAIL_GAP
+        } else {
+            0.0
+        };
 
-    let (w, h) = if edge.vertical() { (depth, run) } else { (run, depth) };
+    let (w, h) = if edge.vertical() {
+        (depth, run)
+    } else {
+        (run, depth)
+    };
     let rail = match edge {
-        Edge::Right => Rect { x: w - thick, y: 0.0, w: thick, h },
-        Edge::Left => Rect { x: 0.0, y: 0.0, w: thick, h },
-        Edge::Bottom => Rect { x: 0.0, y: h - thick, w, h: thick },
-        Edge::Top => Rect { x: 0.0, y: 0.0, w, h: thick },
+        Edge::Right => Rect {
+            x: w - thick,
+            y: 0.0,
+            w: thick,
+            h,
+        },
+        Edge::Left => Rect {
+            x: 0.0,
+            y: 0.0,
+            w: thick,
+            h,
+        },
+        Edge::Bottom => Rect {
+            x: 0.0,
+            y: h - thick,
+            w,
+            h: thick,
+        },
+        Edge::Top => Rect {
+            x: 0.0,
+            y: 0.0,
+            w,
+            h: thick,
+        },
     };
 
     // Cells run along the body, which starts one curl in from each end. Across it,
@@ -283,22 +323,44 @@ pub fn layout(rings: &[Ring], edge: Edge, open: Option<Open>) -> Layout {
         None => (None, None),
         Some((o, (cx, cy))) => {
             let (pw, ph) = panel_size(rings, o);
-            let along = |v: f64, extent: f64, limit: f64| (v - extent / 2.0).clamp(0.0, (limit - extent).max(0.0));
+            let along = |v: f64, extent: f64, limit: f64| {
+                (v - extent / 2.0).clamp(0.0, (limit - extent).max(0.0))
+            };
             let (rect, tip) = match edge {
                 Edge::Right => (
-                    Rect { x: rail.x - TAIL_GAP - TAIL_LEN - pw, y: along(cy, ph, h), w: pw, h: ph },
+                    Rect {
+                        x: rail.x - TAIL_GAP - TAIL_LEN - pw,
+                        y: along(cy, ph, h),
+                        w: pw,
+                        h: ph,
+                    },
                     (rail.x - TAIL_GAP, cy),
                 ),
                 Edge::Left => (
-                    Rect { x: rail.x + RAIL_DEPTH + TAIL_GAP + TAIL_LEN, y: along(cy, ph, h), w: pw, h: ph },
+                    Rect {
+                        x: rail.x + RAIL_DEPTH + TAIL_GAP + TAIL_LEN,
+                        y: along(cy, ph, h),
+                        w: pw,
+                        h: ph,
+                    },
                     (rail.x + RAIL_DEPTH + TAIL_GAP, cy),
                 ),
                 Edge::Bottom => (
-                    Rect { x: along(cx, pw, w), y: rail.y - TAIL_GAP - TAIL_LEN - ph, w: pw, h: ph },
+                    Rect {
+                        x: along(cx, pw, w),
+                        y: rail.y - TAIL_GAP - TAIL_LEN - ph,
+                        w: pw,
+                        h: ph,
+                    },
                     (cx, rail.y - TAIL_GAP),
                 ),
                 Edge::Top => (
-                    Rect { x: along(cx, pw, w), y: rail.y + RAIL_DEPTH + TAIL_GAP + TAIL_LEN, w: pw, h: ph },
+                    Rect {
+                        x: along(cx, pw, w),
+                        y: rail.y + RAIL_DEPTH + TAIL_GAP + TAIL_LEN,
+                        w: pw,
+                        h: ph,
+                    },
                     (cx, rail.y + RAIL_DEPTH + TAIL_GAP),
                 ),
             };
@@ -306,7 +368,14 @@ pub fn layout(rings: &[Ring], edge: Edge, open: Option<Open>) -> Layout {
         }
     };
 
-    Layout { w, h, centers, rail, panel, tail }
+    Layout {
+        w,
+        h,
+        centers,
+        rail,
+        panel,
+        tail,
+    }
 }
 
 /// Which menu row the point is over, given the panel rect the menu was drawn in.
@@ -454,7 +523,16 @@ fn bar(cr: &cairo::Context, x: f64, y: f64, w: f64, frac: f64, color: (f64, f64,
     // Never thinner than it is tall: a 1% reading should still read as a mark, not
     // as an empty track.
     let fw = (w * frac.clamp(0.0, 1.0)).max(BAR_H);
-    rounded(cr, Rect { x, y, w: fw, h: BAR_H }, BAR_H / 2.0);
+    rounded(
+        cr,
+        Rect {
+            x,
+            y,
+            w: fw,
+            h: BAR_H,
+        },
+        BAR_H / 2.0,
+    );
     cr.set_source_rgba(color.0, color.1, color.2, alpha);
     let _ = cr.fill();
 }
@@ -463,6 +541,11 @@ fn bar(cr: &cairo::Context, x: f64, y: f64, w: f64, frac: f64, color: (f64, f64,
 
 /// Pango rather than cairo's toy text API: it kerns, it handles non-ASCII track
 /// titles, and it ellipsizes — all three show up the moment a real song plays.
+///
+/// Every argument is a distinct property of one run of text; bundling them into a
+/// struct would mean building one at each of the dozen call sites and reading no
+/// better for it.
+#[allow(clippy::too_many_arguments)]
 fn text(
     cr: &cairo::Context,
     x: f64,
@@ -507,39 +590,39 @@ pub fn draw(
     let _ = cr.paint();
     cr.set_operator(cairo::Operator::Over);
 
-    if let (Some(rect), Some(tip), Some(o)) = (l.panel, l.tail, open) {
-        if t > 0.004 {
-            let _ = cr.save();
-            // Grow out of the tail tip rather than the panel's own centre: the
-            // panel should look like it came from the notch, not like it faded in
-            // somewhere nearby.
-            cr.translate(tip.0, tip.1);
-            let scale = 0.88 + 0.12 * t;
-            cr.scale(scale, scale);
-            cr.translate(-tip.0, -tip.1);
-            // One group, one alpha — otherwise the tail and the panel cross-fade
-            // against each other and the seam between them shows.
-            let _ = cr.push_group();
+    if let (Some(rect), Some(tip), Some(o)) = (l.panel, l.tail, open)
+        && t > 0.004
+    {
+        let _ = cr.save();
+        // Grow out of the tail tip rather than the panel's own centre: the
+        // panel should look like it came from the notch, not like it faded in
+        // somewhere nearby.
+        cr.translate(tip.0, tip.1);
+        let scale = 0.88 + 0.12 * t;
+        cr.scale(scale, scale);
+        cr.translate(-tip.0, -tip.1);
+        // One group, one alpha — otherwise the tail and the panel cross-fade
+        // against each other and the seam between them shows.
+        cr.push_group();
 
-            tail_path(cr, tip, edge);
-            rgba(cr, body_fill());
-            let _ = cr.fill();
-            rounded(cr, rect, CARD_CORNER);
-            rgba(cr, body_fill());
-            let _ = cr.fill();
-            match o.kind {
-                Kind::Card => {
-                    if let Some(ring) = rings.get(o.ring) {
-                        card(cr, rect, ring);
-                    }
+        tail_path(cr, tip, edge);
+        rgba(cr, body_fill());
+        let _ = cr.fill();
+        rounded(cr, rect, CARD_CORNER);
+        rgba(cr, body_fill());
+        let _ = cr.fill();
+        match o.kind {
+            Kind::Card => {
+                if let Some(ring) = rings.get(o.ring) {
+                    card(cr, rect, ring);
                 }
-                Kind::Menu => menu(cr, rect, hot),
             }
-
-            let _ = cr.pop_group_to_source();
-            let _ = cr.paint_with_alpha(t.clamp(0.0, 1.0));
-            let _ = cr.restore();
+            Kind::Menu => menu(cr, rect, hot),
         }
+
+        let _ = cr.pop_group_to_source();
+        let _ = cr.paint_with_alpha(t.clamp(0.0, 1.0));
+        let _ = cr.restore();
     }
 
     notch_path(cr, l.rail, edge);
@@ -561,7 +644,12 @@ fn menu(cr: &cairo::Context, rect: Rect, hot: Option<usize>) {
         if hot == Some(i) {
             rounded(
                 cr,
-                Rect { x: rect.x + MENU_PAD * 0.4, y, w: rect.w - MENU_PAD * 0.8, h: MENU_ROW_H },
+                Rect {
+                    x: rect.x + MENU_PAD * 0.4,
+                    y,
+                    w: rect.w - MENU_PAD * 0.8,
+                    h: MENU_ROW_H,
+                },
                 MENU_ROW_H * 0.32,
             );
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.11);
@@ -622,7 +710,13 @@ fn ring_at(cr: &cairo::Context, ring: &Ring, cx: f64, cy: f64, lit: f64) {
         cr.set_line_cap(cairo::LineCap::Round);
         cr.set_source_rgba(cr_, cg, cb, a);
         let start = -PI / 2.0;
-        cr.arc(cx, cy, r, start, start + 2.0 * PI * ring.fraction.clamp(0.0, 1.0));
+        cr.arc(
+            cx,
+            cy,
+            r,
+            start,
+            start + 2.0 * PI * ring.fraction.clamp(0.0, 1.0),
+        );
         let _ = cr.stroke();
     }
 
@@ -631,7 +725,10 @@ fn ring_at(cr: &cairo::Context, ring: &Ring, cx: f64, cy: f64, lit: f64) {
         Glyph::Brand { asset, color } => {
             icons::brand(cr, asset, cx, cy, GLYPH, (color.0, color.1, color.2, a));
         }
-        Glyph::Player { desktop_entry, playing } => {
+        Glyph::Player {
+            desktop_entry,
+            playing,
+        } => {
             if !icons::app(cr, desktop_entry, cx, cy, GLYPH as i32) {
                 transport(cr, cx, cy, *playing, a);
             }
@@ -688,7 +785,10 @@ fn card(cr: &cairo::Context, rect: Rect, ring: &Ring) {
                 (color.0, color.1, color.2, 1.0),
             );
         }
-        Glyph::Player { desktop_entry, playing } => {
+        Glyph::Player {
+            desktop_entry,
+            playing,
+        } => {
             let (gx, gy) = (x + GLYPH / 2.0, y + line(FONT_TITLE) / 2.0);
             if !icons::app(cr, desktop_entry, gx, gy, GLYPH as i32) {
                 transport(cr, gx, gy, *playing, 1.0);
@@ -696,21 +796,65 @@ fn card(cr: &cairo::Context, rect: Rect, ring: &Ring) {
         }
     }
     let tx = x + GLYPH + HEADER_GAP;
-    text(cr, tx, y, rect.w - CARD_PAD - tx + rect.x, &ring.label, FONT_TITLE, pango::Weight::Semibold, TEXT, pango::Alignment::Left);
+    text(
+        cr,
+        tx,
+        y,
+        rect.w - CARD_PAD - tx + rect.x,
+        &ring.label,
+        FONT_TITLE,
+        pango::Weight::Semibold,
+        TEXT,
+        pango::Alignment::Left,
+    );
     y += line(FONT_TITLE);
 
     if !ring.note.is_empty() {
         y += HEADER_TO_BLOCK;
-        text(cr, x, y, w, &ring.note, FONT_BODY, pango::Weight::Normal, TEXT_SECONDARY, pango::Alignment::Left);
+        text(
+            cr,
+            x,
+            y,
+            w,
+            &ring.note,
+            FONT_BODY,
+            pango::Weight::Normal,
+            TEXT_SECONDARY,
+            pango::Alignment::Left,
+        );
         y += line(FONT_BODY);
     }
 
     for (i, row) in ring.rows.iter().enumerate() {
-        y += if i == 0 { HEADER_TO_BLOCK } else { BLOCK_SPACING };
+        y += if i == 0 {
+            HEADER_TO_BLOCK
+        } else {
+            BLOCK_SPACING
+        };
         // label left, reset right, on one line
-        text(cr, x, y, w * 0.62, &row.label, FONT_BODY, pango::Weight::Normal, TEXT, pango::Alignment::Left);
+        text(
+            cr,
+            x,
+            y,
+            w * 0.62,
+            &row.label,
+            FONT_BODY,
+            pango::Weight::Normal,
+            TEXT,
+            pango::Alignment::Left,
+        );
         if !row.note.is_empty() {
-            text(cr, x, y, w, &row.note, FONT_BODY, pango::Weight::Normal, TEXT_SECONDARY, pango::Alignment::Right);
+            text(
+                cr,
+                x,
+                y,
+                w,
+                &row.note,
+                FONT_BODY,
+                pango::Weight::Normal,
+                TEXT_SECONDARY,
+                pango::Alignment::Right,
+            );
         }
         y += line(FONT_BODY);
         if let Some(f) = row.bar {
@@ -718,7 +862,17 @@ fn card(cr: &cairo::Context, rect: Rect, ring: &Ring) {
             bar(cr, x, y, w, f, band(f, accent_of(ring)), ring.alpha());
             y += BAR_H + BAR_TO_USED;
         }
-        text(cr, x, y, w, &row.value, FONT_BODY, pango::Weight::Normal, TEXT, pango::Alignment::Left);
+        text(
+            cr,
+            x,
+            y,
+            w,
+            &row.value,
+            FONT_BODY,
+            pango::Weight::Normal,
+            TEXT,
+            pango::Alignment::Left,
+        );
         y += line(FONT_BODY);
     }
 }
@@ -744,7 +898,10 @@ mod tests {
     }
 
     fn card_on(ring: usize) -> Option<Open> {
-        Some(Open { ring, kind: Kind::Card })
+        Some(Open {
+            ring,
+            kind: Kind::Card,
+        })
     }
 
     #[test]
@@ -754,7 +911,11 @@ mod tests {
             for hover in [None, card_on(0), card_on(3)] {
                 let l = layout(&rings, edge, hover);
                 for (i, &(x, y)) in l.centers.iter().enumerate() {
-                    assert_eq!(hit(&l, edge, x, y), Some(i), "{edge:?} hover={hover:?} ring {i}");
+                    assert_eq!(
+                        hit(&l, edge, x, y),
+                        Some(i),
+                        "{edge:?} hover={hover:?} ring {i}"
+                    );
                     assert!(l.rail.contains(x, y), "{edge:?} ring {i} not on the body");
                 }
             }
@@ -817,7 +978,14 @@ mod tests {
     #[test]
     fn menu_rows_are_hittable_and_the_gaps_are_not() {
         let rings: Vec<Ring> = (0..3).map(|_| ring(1)).collect();
-        let l = layout(&rings, Edge::Right, Some(Open { ring: 1, kind: Kind::Menu }));
+        let l = layout(
+            &rings,
+            Edge::Right,
+            Some(Open {
+                ring: 1,
+                kind: Kind::Menu,
+            }),
+        );
         let r = l.panel.expect("the menu is a panel");
         for i in 0..MENU.len() {
             let y = r.y + MENU_PAD + (i as f64 + 0.5) * MENU_ROW_H;
@@ -877,7 +1045,12 @@ fn preview() {
                 row("All models", 0.07, "Thu 12:00 AM"),
             ],
         ),
-        provider("Codex", "openai", 0.21, vec![row("Current session", 0.21, "in 3h 20m")]),
+        provider(
+            "Codex",
+            "openai",
+            0.21,
+            vec![row("Current session", 0.21, "in 3h 20m")],
+        ),
         Ring {
             label: "Spotify".into(),
             percent: "2:14".into(),
@@ -889,15 +1062,32 @@ fn preview() {
                 note: "Playing".into(),
             }],
             fraction: 0.44,
-            glyph: Glyph::Player { desktop_entry: "spotify".into(), playing: true },
+            glyph: Glyph::Player {
+                desktop_entry: "spotify".into(),
+                playing: true,
+            },
             health: Health::Ok,
             action: Some(Action::PlayPause),
         },
     ];
 
     let shut = layout(&rings, Edge::Right, None);
-    let open = layout(&rings, Edge::Right, Some(Open { ring: 0, kind: Kind::Card }));
-    let menu = layout(&rings, Edge::Right, Some(Open { ring: 2, kind: Kind::Menu }));
+    let open = layout(
+        &rings,
+        Edge::Right,
+        Some(Open {
+            ring: 0,
+            kind: Kind::Card,
+        }),
+    );
+    let menu = layout(
+        &rings,
+        Edge::Right,
+        Some(Open {
+            ring: 2,
+            kind: Kind::Menu,
+        }),
+    );
     let (pad, gap) = (26.0, 26.0);
     let w = (pad * 2.0 + shut.w + gap + open.w + gap + menu.w) as i32;
     let h = (pad * 2.0 + shut.h.max(open.h)) as i32;
@@ -906,10 +1096,21 @@ fn preview() {
     let cr = cairo::Context::new(&surf).unwrap();
     for (l, open, hot, x) in [
         (&shut, None, None, pad),
-        (&open, Some(Open { ring: 0, kind: Kind::Card }), None, pad + shut.w + gap),
+        (
+            &open,
+            Some(Open {
+                ring: 0,
+                kind: Kind::Card,
+            }),
+            None,
+            pad + shut.w + gap,
+        ),
         (
             &menu,
-            Some(Open { ring: 2, kind: Kind::Menu }),
+            Some(Open {
+                ring: 2,
+                kind: Kind::Menu,
+            }),
             Some(0),
             pad + shut.w + gap + open.w + gap,
         ),

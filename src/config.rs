@@ -18,7 +18,10 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { edge: "right".into(), offset: 0.5 }
+        Config {
+            edge: "right".into(),
+            offset: 0.5,
+        }
     }
 }
 
@@ -51,7 +54,10 @@ impl Config {
     pub fn save(edge: Edge, offset: f64) {
         let Some(p) = path() else { return };
         let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
-        let cfg = Config { edge: edge.name().into(), offset };
+        let cfg = Config {
+            edge: edge.name().into(),
+            offset,
+        };
         if let Ok(t) = serde_json::to_string_pretty(&cfg) {
             let _ = std::fs::write(p, t);
         }

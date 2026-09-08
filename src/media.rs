@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::ops::Deref;
-use zbus::blocking::{fdo::DBusProxy, Connection, Proxy};
+use zbus::blocking::{Connection, Proxy, fdo::DBusProxy};
 use zbus::zvariant::{OwnedValue, Value};
 
 const PATH: &str = "/org/mpris/MediaPlayer2";
@@ -117,7 +117,10 @@ pub fn poll(conn: &Connection) -> Option<Media> {
                 .get("xesam:title")
                 .and_then(as_str)
                 .unwrap_or_else(|| "Unknown track".into()),
-            artist: meta.get("xesam:artist").and_then(as_str).unwrap_or_default(),
+            artist: meta
+                .get("xesam:artist")
+                .and_then(as_str)
+                .unwrap_or_default(),
             playing: status == "Playing",
             progress: if has_progress {
                 (position as f64 / length as f64).clamp(0.0, 1.0)
