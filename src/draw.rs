@@ -517,6 +517,10 @@ struct IslandGeom {
     rc: f64,
     rf_left: f64,
     rf_right: f64,
+    /// Whether the rail's end flare and corner still fit before the panel on each side.
+    /// When they do not, the panel runs straight into the bezel (a square join).
+    flare_left: bool,
+    flare_right: bool,
 }
 
 impl IslandGeom {
@@ -550,28 +554,30 @@ impl IslandGeom {
         let min_v = top + corner_r;
         let max_v = bottom - corner_r;
 
-        // 2. Along the edge: cap expand to room remaining before rail ends.
-        let avail_left_room = (v_mid - hw_base - min_v).max(0.0);
-        let avail_right_room = (max_v - (v_mid + hw_base)).max(0.0);
+        // 2. Along the edge: cap expand to room remaining before the window ends.
+        let avail_left_room = (v_mid - hw_base).max(0.0);
+        let avail_right_room = (length - (v_mid + hw_base)).max(0.0);
         let expand_v = expand.min(avail_left_room.min(avail_right_room)).max(0.0);
 
+        // The outline must cover the rect the content is laid out in, so the span
+        // is only limited by the window, never by the straight part of the rail.
         let hw = (hw_base + expand_v).max(0.0);
-        let v1 = (v_mid - hw).clamp(min_v, max_v);
-        let v2 = (v_mid + hw).clamp(v1, max_v);
+        let v1 = (v_mid - hw).max(0.0);
+        let v2 = (v_mid + hw).min(length);
 
         let rc = (CARD_CORNER + expand_d)
             .min(d / 2.0)
             .min((v2 - v1) / 2.0)
             .max(0.0);
 
-        let avail_left = v1 - min_v;
+        let avail_left = (v1 - min_v).max(0.0);
         let rf_left = FILLET_R
             .min(d / 2.0)
             .min((v2 - v1) / 4.0)
             .min(avail_left)
             .max(0.0);
 
-        let avail_right = max_v - v2;
+        let avail_right = (max_v - v2).max(0.0);
         let rf_right = FILLET_R
             .min(d / 2.0)
             .min((v2 - v1) / 4.0)
@@ -591,6 +597,8 @@ impl IslandGeom {
             rc,
             rf_left,
             rf_right,
+            flare_left: v1 > min_v,
+            flare_right: v2 < max_v,
         }
     }
 
@@ -657,43 +665,51 @@ fn island_path(
     apply_canonical_transform(cr, rail, edge, geom.thick, geom.length);
 
     cr.new_path();
-    cr.move_to(geom.thick, 0.0);
-    if geom.curl > 0.0 {
-        corner(
-            cr,
-            (geom.thick, 0.0),
-            (geom.thick - geom.curl, geom.top),
-            false,
-        );
+    if geom.flare_left {
+        cr.move_to(geom.thick, 0.0);
+        if geom.curl > 0.0 {
+            corner(
+                cr,
+                (geom.thick, 0.0),
+                (geom.thick - geom.curl, geom.top),
+                false,
+            );
+        }
+        cr.line_to(geom.corner, geom.top);
+        if geom.corner > 0.0 {
+            corner(
+                cr,
+                (geom.corner, geom.top),
+                (0.0, geom.top + geom.corner),
+                true,
+            );
+        }
+        cr.line_to(0.0, geom.v1 - geom.rf_left);
+    } else {
+        cr.move_to(geom.thick, geom.v1);
     }
-    cr.line_to(geom.corner, geom.top);
-    if geom.corner > 0.0 {
-        corner(
-            cr,
-            (geom.corner, geom.top),
-            (0.0, geom.top + geom.corner),
-            true,
-        );
-    }
-    cr.line_to(0.0, geom.v1 - geom.rf_left);
     geom.draw_panel_perimeter(cr);
-    cr.line_to(0.0, geom.bottom - geom.corner);
-    if geom.corner > 0.0 {
-        corner(
-            cr,
-            (0.0, geom.bottom - geom.corner),
-            (geom.corner, geom.bottom),
-            false,
-        );
-    }
-    cr.line_to(geom.thick - geom.curl, geom.bottom);
-    if geom.curl > 0.0 {
-        corner(
-            cr,
-            (geom.thick - geom.curl, geom.bottom),
-            (geom.thick, geom.length),
-            true,
-        );
+    if geom.flare_right {
+        cr.line_to(0.0, geom.bottom - geom.corner);
+        if geom.corner > 0.0 {
+            corner(
+                cr,
+                (0.0, geom.bottom - geom.corner),
+                (geom.corner, geom.bottom),
+                false,
+            );
+        }
+        cr.line_to(geom.thick - geom.curl, geom.bottom);
+        if geom.curl > 0.0 {
+            corner(
+                cr,
+                (geom.thick - geom.curl, geom.bottom),
+                (geom.thick, geom.length),
+                true,
+            );
+        }
+    } else {
+        cr.line_to(geom.thick, geom.v2);
     }
     cr.close_path();
     let _ = cr.restore();
@@ -1298,6 +1314,39 @@ mod tests {
                         cairo::PathSegment::CurveTo(_, _, (x, y)) => prev = (x, y),
                         cairo::PathSegment::ClosePath => {}
                     }
+                }
+            }
+        }
+    }
+
+    /// The outline is what clips the content, so it must reach every side of the
+    /// rect the content is laid out in — also when that rect reaches a rail end.
+    #[test]
+    fn island_outline_covers_the_content_rect_when_panel_reaches_a_rail_end() {
+        for count in [3, 4] {
+            let rings: Vec<Ring> = (0..count).map(|_| ring(3)).collect();
+            for edge in [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom] {
+                for hover in [0, rings.len() - 1] {
+                    let l = layout(&rings, edge, card_on(hover));
+                    let panel = l.panel.expect("hover opens a card");
+                    let surf = cairo::ImageSurface::create(
+                        cairo::Format::ARgb32,
+                        l.w as i32 + 1,
+                        l.h as i32 + 1,
+                    )
+                    .unwrap();
+                    let cr = cairo::Context::new(&surf).unwrap();
+                    island_path(&cr, l.rail, edge, panel, 1.0, 0.0, 0.0);
+                    let (x1, y1, x2, y2) = cr.path_extents().unwrap();
+                    let eps = 0.01;
+                    assert!(
+                        x1 <= panel.x + eps
+                            && y1 <= panel.y + eps
+                            && x2 >= panel.x + panel.w - eps
+                            && y2 >= panel.y + panel.h - eps,
+                        "{edge:?} n={count} hover={hover}: outline ({x1:.1}, {y1:.1})-({x2:.1}, {y2:.1}) \
+                         does not cover content {panel:?}"
+                    );
                 }
             }
         }
