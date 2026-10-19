@@ -54,9 +54,8 @@ const RING_LABEL_GAP: f64 = px(26.9);
 const CARD_W: f64 = px(600.0);
 const CARD_CORNER: f64 = px(49.5);
 const CARD_PAD: f64 = px(32.0);
-const TAIL_LEN: f64 = px(75.0);
-const TAIL_H: f64 = px(87.0);
-const TAIL_GAP: f64 = px(28.0); // tail tip -> notch body edge
+const FILLET_R: f64 = px(36.0); // smooth concave fillet joining rail into panel
+const KAPPA: f64 = 0.6; // symmetric squircle control point ratio (~0.6)
 const BAR_H: f64 = px(10.5);
 const HEADER_GAP: f64 = px(17.0); // mark -> title
 const HEADER_TO_BLOCK: f64 = px(21.0);
@@ -75,23 +74,24 @@ const MENU_PAD: f64 = px(20.0);
 pub const MENU: [&str; 2] = ["Refresh now", "Quit linotch"];
 
 // ---- type -------------------------------------------------------------------
+const FONT_FAMILY: &str = "SF Pro Text, Inter, Cantarell, Noto Sans, sans-serif";
 const FONT_PERCENT: f64 = font_px(27.0);
 const FONT_TITLE: f64 = font_px(26.0);
 const FONT_BODY: f64 = font_px(18.0);
 
-/// Upstream sampled these off the design frame; they are not the hexes in its
-/// written spec, and the frame won.
+/// Apple Dynamic Island palette: pure black body, luminous semantic accents,
+/// SF gray secondary text, and semi-transparent white tracks.
 const NOTCH_RGB: (f64, f64, f64) = (0.0, 0.0, 0.0);
-const RING_TRACK: (f64, f64, f64, f64) = (0.188, 0.188, 0.188, 1.0); // #303030
-const BAR_TRACK: (f64, f64, f64, f64) = (0.176, 0.176, 0.176, 1.0); // #2d2d2d
-const AMPLE: (f64, f64, f64) = (0.0, 1.0, 0.533); // #00ff88
-const WATCH: (f64, f64, f64) = (0.949, 1.0, 0.0); // #f2ff00
-const CRITICAL: (f64, f64, f64) = (1.0, 0.247, 0.0); // #ff3f00
+const RING_TRACK: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.11);
+const BAR_TRACK: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.11);
+const AMPLE: (f64, f64, f64) = (48.0 / 255.0, 209.0 / 255.0, 88.0 / 255.0); // #30D158 (iOS green)
+const WATCH: (f64, f64, f64) = (1.0, 214.0 / 255.0, 10.0 / 255.0); // #FFD60A (iOS yellow)
+const CRITICAL: (f64, f64, f64) = (1.0, 69.0 / 255.0, 58.0 / 255.0); // #FF453A (iOS red)
 /// Anything with no colour of its own: upstream's Claude mark colour, which is
 /// also the app's own accent.
 pub const FALLBACK: (f64, f64, f64) = (0.851, 0.467, 0.341); // #d97757
 const TEXT: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 1.0);
-const TEXT_SECONDARY: (f64, f64, f64, f64) = (0.502, 0.502, 0.502, 1.0); // #808080
+const TEXT_SECONDARY: (f64, f64, f64, f64) = (142.0 / 255.0, 142.0 / 255.0, 147.0 / 255.0, 1.0); // #8E8E93
 
 /// codenotch's bands: under half is ample, then watch, then critical. A ring with
 /// an accent of its own — media, coloured from the player's icon — is outside the
@@ -168,8 +168,6 @@ pub struct Layout {
     pub rail: Rect,
     /// The open card or menu.
     pub panel: Option<Rect>,
-    /// Tail tip, pointing at the ring the panel belongs to.
-    pub tail: Option<(f64, f64)>,
 }
 
 /// One cell: ring, gap, percent label.
@@ -227,6 +225,18 @@ fn widest_panel() -> f64 {
     CARD_W.max(MENU_W)
 }
 
+fn max_panel_depth(rings: &[Ring], edge: Edge) -> f64 {
+    if edge.vertical() {
+        widest_panel()
+    } else {
+        rings
+            .iter()
+            .map(card_height)
+            .fold(0.0_f64, f64::max)
+            .max(menu_height())
+    }
+}
+
 fn card_height(ring: &Ring) -> f64 {
     let block = line(FONT_BODY) + LABEL_TO_BAR + BAR_H + BAR_TO_USED + line(FONT_BODY);
     let rows = ring.rows.len() as f64;
@@ -248,6 +258,9 @@ fn card_height(ring: &Ring) -> f64 {
     2.0 * CARD_PAD + line(FONT_TITLE) + note + body
 }
 
+/// Room for the 24px ambient elevation shadow (spec 5.2).
+pub const SHADOW_PAD: f64 = 24.0;
+
 /// `hover` decides whether a card is drawn and where it points — but **not** how
 /// long the window is.
 ///
@@ -263,7 +276,7 @@ pub fn layout(rings: &[Ring], edge: Edge, open: Option<Open>) -> Layout {
         .max(menu_height());
     let depth = thick
         + if open.is_some() {
-            widest_panel() + TAIL_LEN + TAIL_GAP
+            max_panel_depth(rings, edge) + SHADOW_PAD
         } else {
             0.0
         };
@@ -315,56 +328,42 @@ pub fn layout(rings: &[Ring], edge: Edge, open: Option<Open>) -> Layout {
         })
         .collect::<Vec<_>>();
 
-    // The panel hangs off whichever side of the rail faces the screen, so it opens
-    // away from the bezel: leftwards from a right-edge notch, downwards from a top
-    // one. The window is already wide enough for the widest panel, so a narrow one
-    // simply sits against the rail rather than being centred in dead space.
-    let (panel, tail) = match open.and_then(|o| centers.get(o.ring).map(|c| (o, *c))) {
-        None => (None, None),
+    // The panel grows out of the rail, anchored to the screen edge and centered
+    // on the hovered ring.
+    let panel = match open.and_then(|o| centers.get(o.ring).map(|c| (o, *c))) {
+        None => None,
         Some((o, (cx, cy))) => {
             let (pw, ph) = panel_size(rings, o);
             let along = |v: f64, extent: f64, limit: f64| {
                 (v - extent / 2.0).clamp(0.0, (limit - extent).max(0.0))
             };
-            let (rect, tip) = match edge {
-                Edge::Right => (
-                    Rect {
-                        x: rail.x - TAIL_GAP - TAIL_LEN - pw,
-                        y: along(cy, ph, h),
-                        w: pw,
-                        h: ph,
-                    },
-                    (rail.x - TAIL_GAP, cy),
-                ),
-                Edge::Left => (
-                    Rect {
-                        x: rail.x + RAIL_DEPTH + TAIL_GAP + TAIL_LEN,
-                        y: along(cy, ph, h),
-                        w: pw,
-                        h: ph,
-                    },
-                    (rail.x + RAIL_DEPTH + TAIL_GAP, cy),
-                ),
-                Edge::Bottom => (
-                    Rect {
-                        x: along(cx, pw, w),
-                        y: rail.y - TAIL_GAP - TAIL_LEN - ph,
-                        w: pw,
-                        h: ph,
-                    },
-                    (cx, rail.y - TAIL_GAP),
-                ),
-                Edge::Top => (
-                    Rect {
-                        x: along(cx, pw, w),
-                        y: rail.y + RAIL_DEPTH + TAIL_GAP + TAIL_LEN,
-                        w: pw,
-                        h: ph,
-                    },
-                    (cx, rail.y + RAIL_DEPTH + TAIL_GAP),
-                ),
+            let rect = match edge {
+                Edge::Right => Rect {
+                    x: rail.x - pw,
+                    y: along(cy, ph, h),
+                    w: pw,
+                    h: ph,
+                },
+                Edge::Left => Rect {
+                    x: rail.x + thick,
+                    y: along(cy, ph, h),
+                    w: pw,
+                    h: ph,
+                },
+                Edge::Bottom => Rect {
+                    x: along(cx, pw, w),
+                    y: rail.y - ph,
+                    w: pw,
+                    h: ph,
+                },
+                Edge::Top => Rect {
+                    x: along(cx, pw, w),
+                    y: rail.y + thick,
+                    w: pw,
+                    h: ph,
+                },
             };
-            (Some(rect), Some(tip))
+            Some(rect)
         }
     };
 
@@ -374,7 +373,6 @@ pub fn layout(rings: &[Ring], edge: Edge, open: Option<Open>) -> Layout {
         centers,
         rail,
         panel,
-        tail,
     }
 }
 
@@ -410,6 +408,31 @@ fn rgba(cr: &cairo::Context, c: (f64, f64, f64, f64)) {
     cr.set_source_rgba(c.0, c.1, c.2, c.3);
 }
 
+/// Draw an axis-aligned 90-degree continuous-curvature corner curve with symmetric handles (~0.6).
+fn corner(cr: &cairo::Context, from: (f64, f64), to: (f64, f64), initial_horizontal: bool) {
+    let (x0, y0) = from;
+    let (x1, y1) = to;
+    if (x0 - x1).abs() < 1e-6 && (y0 - y1).abs() < 1e-6 {
+        return;
+    }
+    let (cp1, cp2) = if initial_horizontal {
+        ((x0 + (x1 - x0) * KAPPA, y0), (x1, y1 - (y1 - y0) * KAPPA))
+    } else {
+        ((x0, y0 + (y1 - y0) * KAPPA), (x1 - (x1 - x0) * KAPPA, y1))
+    };
+    cr.curve_to(cp1.0, cp1.1, cp2.0, cp2.1, x1, y1);
+}
+
+fn apply_canonical_transform(cr: &cairo::Context, rail: Rect, edge: Edge, thick: f64, length: f64) {
+    cr.translate(rail.x, rail.y);
+    match edge {
+        Edge::Right => {}
+        Edge::Left => cr.transform(cairo::Matrix::new(-1.0, 0.0, 0.0, 1.0, thick, 0.0)),
+        Edge::Top => cr.transform(cairo::Matrix::new(0.0, -1.0, 1.0, 0.0, 0.0, thick)),
+        Edge::Bottom => cr.transform(cairo::Matrix::new(0.0, 1.0, -1.0, 0.0, length, 0.0)),
+    }
+}
+
 /// The notch body: a pill welded to one edge, with *inverse* rounded corners at
 /// each end that flare back out to the bezel, so it reads as part of the edge
 /// rather than a panel floating near it.
@@ -419,111 +442,351 @@ fn rgba(cr: &cairo::Context, c: (f64, f64, f64, f64)) {
 /// that took care, and four hand-written copies would mean three that are never
 /// the one under the cursor when it breaks.
 fn notch_path(cr: &cairo::Context, rail: Rect, edge: Edge) {
-    let (depth, length) = if edge.vertical() {
+    let (thick, length) = if edge.vertical() {
         (rail.w, rail.h)
     } else {
         (rail.h, rail.w)
     };
 
-    // Order matters. Clamping the corner by `depth - curl` collapses it to zero as
-    // soon as the flare is as wide as the body; the corner is claimed first, out of
-    // half the depth, and the flare takes what is left.
-    let wanted = CORNER.min(depth / 2.0).max(0.0);
-    let curl = CURL.min(length / 2.0).min(depth - wanted).max(0.0);
-    let corner = wanted.min((length - 2.0 * curl) / 2.0).max(0.0);
+    let wanted = CORNER.min(thick / 2.0).max(0.0);
+    let curl = CURL.min(length / 2.0).min(thick - wanted).max(0.0);
+    let corner_r = wanted.min((length - 2.0 * curl) / 2.0).max(0.0);
     let (top, bottom) = (curl, length - curl);
 
     let _ = cr.save();
-    cr.translate(rail.x, rail.y);
-    // Canonical (u across from the far side, v along) onto this edge, bezel right.
-    match edge {
-        Edge::Right => {}
-        Edge::Left => cr.transform(cairo::Matrix::new(-1.0, 0.0, 0.0, 1.0, depth, 0.0)),
-        Edge::Top => cr.transform(cairo::Matrix::new(0.0, -1.0, 1.0, 0.0, 0.0, depth)),
-        // A quarter turn the other way, not a mirror: (u,v) -> (length - v, u).
-        Edge::Bottom => cr.transform(cairo::Matrix::new(0.0, 1.0, -1.0, 0.0, length, 0.0)),
-    }
+    apply_canonical_transform(cr, rail, edge, thick, length);
 
-    // Cairo's y runs down, so SwiftUI's `clockwise: false` (increasing angle) is
-    // plain `arc`, and its `clockwise: true` is `arc_negative`. Getting that pair
-    // backwards sends each corner the long way round the circle, which is exactly
-    // what turned the flares into spikes.
     cr.new_path();
-    cr.move_to(depth, 0.0);
+    cr.move_to(thick, 0.0);
     if curl > 0.0 {
-        // Concave: the body pulls away from the bezel rather than rounding into it.
-        cr.arc(depth - curl, 0.0, curl, 0.0, PI / 2.0);
+        corner(cr, (thick, 0.0), (thick - curl, top), false);
     }
-    cr.line_to(corner, top);
-    cr.arc_negative(corner, top + corner, corner, 1.5 * PI, PI);
-    cr.line_to(0.0, bottom - corner);
-    cr.arc_negative(corner, bottom - corner, corner, PI, PI / 2.0);
-    cr.line_to(depth - curl, bottom);
+    cr.line_to(corner_r, top);
+    if corner_r > 0.0 {
+        corner(cr, (corner_r, top), (0.0, top + corner_r), true);
+    }
+    cr.line_to(0.0, bottom - corner_r);
+    if corner_r > 0.0 {
+        corner(cr, (0.0, bottom - corner_r), (corner_r, bottom), false);
+    }
+    cr.line_to(thick - curl, bottom);
     if curl > 0.0 {
-        cr.arc(depth - curl, length, curl, 1.5 * PI, 2.0 * PI);
+        corner(cr, (thick - curl, bottom), (thick, length), true);
     }
     cr.close_path();
     let _ = cr.restore();
 }
 
-fn rounded(cr: &cairo::Context, rect: Rect, r: f64) {
-    let Rect { x, y, w, h } = rect;
-    let r = r.min(w / 2.0).min(h / 2.0);
-    cr.new_path();
-    cr.new_sub_path();
-    cr.arc(x + w - r, y + r, r, -PI / 2.0, 0.0);
-    cr.arc(x + w - r, y + h - r, r, 0.0, PI / 2.0);
-    cr.arc(x + r, y + h - r, r, PI / 2.0, PI);
-    cr.arc(x + r, y + r, r, PI, 1.5 * PI);
-    cr.close_path();
+struct CanonicalPanel {
+    v1: f64,
+    v2: f64,
+    depth: f64,
 }
 
-/// Upstream's tail: two cubics from shoulder to tip, so it leaves the card as a
-/// swelling rather than a triangle stuck on the side.
-fn tail_path(cr: &cairo::Context, tip: (f64, f64), edge: Edge) {
-    let (tx, ty) = tip;
-    let (len, half) = (TAIL_LEN, TAIL_H / 2.0);
+fn canonical_panel(rect: Rect, rail: Rect, edge: Edge) -> CanonicalPanel {
+    match edge {
+        Edge::Top => CanonicalPanel {
+            v1: rect.x,
+            v2: rect.x + rect.w,
+            depth: rect.h,
+        },
+        Edge::Left | Edge::Right => CanonicalPanel {
+            v1: rect.y,
+            v2: rect.y + rect.h,
+            depth: rect.w,
+        },
+        Edge::Bottom => CanonicalPanel {
+            v1: rail.w - (rect.x + rect.w),
+            v2: rail.w - rect.x,
+            depth: rect.h,
+        },
+    }
+}
+
+/// Geometry parameters for the unified Dynamic Island shape. Shared by `island_path` and `draw_rim_stroke`.
+struct IslandGeom {
+    thick: f64,
+    length: f64,
+    curl: f64,
+    top: f64,
+    corner: f64,
+    bottom: f64,
+    d: f64,
+    v1: f64,
+    v2: f64,
+    rc: f64,
+    rf_left: f64,
+    rf_right: f64,
+    /// Whether the rail's end flare and corner still fit before the panel on each side.
+    /// When they do not, the panel runs straight into the bezel (a square join).
+    flare_left: bool,
+    flare_right: bool,
+}
+
+impl IslandGeom {
+    fn new(rail: Rect, edge: Edge, panel: Rect, t: f64, offset: f64, expand: f64) -> Self {
+        let (thick, length) = if edge.vertical() {
+            (rail.w, rail.h)
+        } else {
+            (rail.h, rail.w)
+        };
+
+        let wanted = CORNER.min(thick / 2.0).max(0.0);
+        let curl = CURL.min(length / 2.0).min(thick - wanted).max(0.0);
+        let corner_r = wanted.min((length - 2.0 * curl) / 2.0).max(0.0);
+        let (top, bottom) = (curl, length - curl);
+
+        let canon = canonical_panel(panel, rail, edge);
+        let t_geom = t.clamp(0.0, 1.05);
+        let base_d = (canon.depth * t_geom).max(0.0);
+
+        // Cap expand so shadow never clips against the window boundary:
+        // 1. In depth: window allocated depth is canon.depth + SHADOW_PAD.
+        let max_expand_d = (canon.depth + SHADOW_PAD - base_d - offset).max(0.0);
+        let expand_d = expand.min(max_expand_d).max(0.0);
+        let d = (base_d + offset + expand_d).max(0.0);
+
+        let v_mid = (canon.v1 + canon.v2) / 2.0;
+        let target_hw = (canon.v2 - canon.v1) / 2.0;
+        let init_hw = (RING_D / 2.0).min(target_hw);
+        let hw_base = init_hw + (target_hw - init_hw) * t.clamp(0.0, 1.0);
+
+        let min_v = top + corner_r;
+        let max_v = bottom - corner_r;
+
+        // 2. Along the edge: cap expand to room remaining before the window ends.
+        let avail_left_room = (v_mid - hw_base).max(0.0);
+        let avail_right_room = (length - (v_mid + hw_base)).max(0.0);
+        let expand_v = expand.min(avail_left_room.min(avail_right_room)).max(0.0);
+
+        // The outline must cover the rect the content is laid out in, so the span
+        // is only limited by the window, never by the straight part of the rail.
+        let hw = (hw_base + expand_v).max(0.0);
+        let v1 = (v_mid - hw).max(0.0);
+        let v2 = (v_mid + hw).min(length);
+
+        let rc = (CARD_CORNER + expand_d)
+            .min(d / 2.0)
+            .min((v2 - v1) / 2.0)
+            .max(0.0);
+
+        let avail_left = (v1 - min_v).max(0.0);
+        let rf_left = FILLET_R
+            .min(d / 2.0)
+            .min((v2 - v1) / 4.0)
+            .min(avail_left)
+            .max(0.0);
+
+        let avail_right = (max_v - v2).max(0.0);
+        let rf_right = FILLET_R
+            .min(d / 2.0)
+            .min((v2 - v1) / 4.0)
+            .min(avail_right)
+            .max(0.0);
+
+        Self {
+            thick,
+            length,
+            curl,
+            top,
+            corner: corner_r,
+            bottom,
+            d,
+            v1,
+            v2,
+            rc,
+            rf_left,
+            rf_right,
+            flare_left: v1 > min_v,
+            flare_right: v2 < max_v,
+        }
+    }
+
+    /// Traces the open panel perimeter from the start of the left fillet to the end of the right fillet.
+    fn draw_panel_perimeter(&self, cr: &cairo::Context) {
+        if self.rf_left > 0.0 {
+            corner(
+                cr,
+                (0.0, self.v1 - self.rf_left),
+                (-self.rf_left, self.v1),
+                false,
+            );
+        }
+        cr.line_to(-self.d + self.rc, self.v1);
+        if self.rc > 0.0 {
+            corner(
+                cr,
+                (-self.d + self.rc, self.v1),
+                (-self.d, self.v1 + self.rc),
+                true,
+            );
+        }
+        cr.line_to(-self.d, self.v2 - self.rc);
+        if self.rc > 0.0 {
+            corner(
+                cr,
+                (-self.d, self.v2 - self.rc),
+                (-self.d + self.rc, self.v2),
+                false,
+            );
+        }
+        cr.line_to(-self.rf_right, self.v2);
+        if self.rf_right > 0.0 {
+            corner(
+                cr,
+                (-self.rf_right, self.v2),
+                (0.0, self.v2 + self.rf_right),
+                true,
+            );
+        }
+    }
+}
+
+/// The unified Dynamic Island body: rail + panel as one continuous topological shape,
+/// with smooth concave fillets joining the rail into the panel and continuous-curvature
+/// squircles on all corners. Morph smoothly with parameter `t`. Supports outward `offset`
+/// and concentric `expand` for the ambient elevation shadow.
+fn island_path(
+    cr: &cairo::Context,
+    rail: Rect,
+    edge: Edge,
+    panel: Rect,
+    t: f64,
+    offset: f64,
+    expand: f64,
+) {
+    let geom = IslandGeom::new(rail, edge, panel, t, offset, expand);
+    if geom.d < 0.5 {
+        notch_path(cr, rail, edge);
+        return;
+    }
+
+    let _ = cr.save();
+    apply_canonical_transform(cr, rail, edge, geom.thick, geom.length);
+
     cr.new_path();
-    // Canonical: tip to the right, base a `len` back along the axis.
-    let (a, b, a_sh, a_tp, b_tp, b_sh, t) = if edge.vertical() {
-        let s = if edge == Edge::Right { 1.0 } else { -1.0 };
-        let bx = tx - s * len;
-        (
-            (bx, ty - half),
-            (bx, ty + half),
-            (bx, ty - half * 0.5),
-            (tx - s * len * 0.42, ty - half * 0.24),
-            (tx - s * len * 0.42, ty + half * 0.24),
-            (bx, ty + half * 0.5),
-            (tx, ty),
-        )
+    if geom.flare_left {
+        cr.move_to(geom.thick, 0.0);
+        if geom.curl > 0.0 {
+            corner(
+                cr,
+                (geom.thick, 0.0),
+                (geom.thick - geom.curl, geom.top),
+                false,
+            );
+        }
+        cr.line_to(geom.corner, geom.top);
+        if geom.corner > 0.0 {
+            corner(
+                cr,
+                (geom.corner, geom.top),
+                (0.0, geom.top + geom.corner),
+                true,
+            );
+        }
+        cr.line_to(0.0, geom.v1 - geom.rf_left);
     } else {
-        let s = if edge == Edge::Bottom { 1.0 } else { -1.0 };
-        let by = ty - s * len;
-        (
-            (tx - half, by),
-            (tx + half, by),
-            (tx - half * 0.5, by),
-            (tx - half * 0.24, ty - s * len * 0.42),
-            (tx + half * 0.24, ty - s * len * 0.42),
-            (tx + half * 0.5, by),
-            (tx, ty),
-        )
-    };
-    cr.move_to(a.0, a.1);
-    cr.curve_to(a_sh.0, a_sh.1, a_tp.0, a_tp.1, t.0, t.1);
-    cr.curve_to(b_tp.0, b_tp.1, b_sh.0, b_sh.1, b.0, b.1);
+        cr.move_to(geom.thick, geom.v1);
+    }
+    geom.draw_panel_perimeter(cr);
+    if geom.flare_right {
+        cr.line_to(0.0, geom.bottom - geom.corner);
+        if geom.corner > 0.0 {
+            corner(
+                cr,
+                (0.0, geom.bottom - geom.corner),
+                (geom.corner, geom.bottom),
+                false,
+            );
+        }
+        cr.line_to(geom.thick - geom.curl, geom.bottom);
+        if geom.curl > 0.0 {
+            corner(
+                cr,
+                (geom.thick - geom.curl, geom.bottom),
+                (geom.thick, geom.length),
+                true,
+            );
+        }
+    } else {
+        cr.line_to(geom.thick, geom.v2);
+    }
+    cr.close_path();
+    let _ = cr.restore();
+}
+
+/// 3-tier concentric ambient gradient shadow (Apple elevation shadow, spec 5.2):
+/// 1. Atmospheric feather: offset 6px downward, expand 18px, alpha 0.08
+/// 2. Ambient bloom: offset 3px downward, expand 8px, alpha 0.18
+/// 3. Contact shadow: offset 1px downward, expand 2px, alpha 0.35
+fn draw_ambient_shadow(cr: &cairo::Context, rail: Rect, edge: Edge, panel: Rect, t: f64) {
+    if t <= 0.05 {
+        return;
+    }
+    let shadow_alpha = ((t - 0.1) / 0.9).clamp(0.0, 1.0);
+    const PASSES: [(f64, f64, f64); 3] = [(6.0, 18.0, 0.08), (3.0, 8.0, 0.18), (1.0, 2.0, 0.35)];
+    for (offset, expand, alpha) in PASSES {
+        island_path(cr, rail, edge, panel, t, offset, expand);
+        cr.set_source_rgba(0.0, 0.0, 0.0, alpha * shadow_alpha);
+        let _ = cr.fill();
+    }
+}
+
+/// 1px luminous rim highlight along the panel perimeter, rendered with a subtle
+/// vertical gradient (top ~0.22 white alpha -> bottom ~0.04).
+fn draw_rim_stroke(cr: &cairo::Context, rail: Rect, edge: Edge, panel: Rect, t: f64) {
+    if t <= 0.05 {
+        return;
+    }
+    let geom = IslandGeom::new(rail, edge, panel, t, 0.0, 0.0);
+    if geom.d < 1.0 {
+        return;
+    }
+    let rim_alpha = ((t - 0.1) / 0.9).clamp(0.0, 1.0);
+
+    let _ = cr.save();
+    apply_canonical_transform(cr, rail, edge, geom.thick, geom.length);
+
+    cr.new_path();
+    cr.move_to(0.0, geom.v1 - geom.rf_left);
+    geom.draw_panel_perimeter(cr);
+
+    let g = cairo::LinearGradient::new(0.0, 0.0, -geom.d, 0.0);
+    g.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.22 * rim_alpha);
+    g.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.04 * rim_alpha);
+    cr.set_line_width(1.0);
+    if let Ok(()) = cr.set_source(&g) {
+        let _ = cr.stroke();
+    }
+    let _ = cr.restore();
+}
+
+fn squircle_path(cr: &cairo::Context, rect: Rect, r: f64) {
+    let Rect { x, y, w, h } = rect;
+    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+    cr.new_path();
+    if r <= 0.0 {
+        cr.rectangle(x, y, w, h);
+        return;
+    }
+    cr.move_to(x + r, y);
+    cr.line_to(x + w - r, y);
+    corner(cr, (x + w - r, y), (x + w, y + r), true);
+    cr.line_to(x + w, y + h - r);
+    corner(cr, (x + w, y + h - r), (x + w - r, y + h), false);
+    cr.line_to(x + r, y + h);
+    corner(cr, (x + r, y + h), (x, y + h - r), true);
+    cr.line_to(x, y + r);
+    corner(cr, (x, y + r), (x + r, y), false);
     cr.close_path();
 }
 
 fn bar(cr: &cairo::Context, x: f64, y: f64, w: f64, frac: f64, color: (f64, f64, f64), alpha: f64) {
-    rounded(cr, Rect { x, y, w, h: BAR_H }, BAR_H / 2.0);
+    squircle_path(cr, Rect { x, y, w, h: BAR_H }, BAR_H / 2.0);
     rgba(cr, BAR_TRACK);
     let _ = cr.fill();
-    // Never thinner than it is tall: a 1% reading should still read as a mark, not
-    // as an empty track.
     let fw = (w * frac.clamp(0.0, 1.0)).max(BAR_H);
-    rounded(
+    squircle_path(
         cr,
         Rect {
             x,
@@ -539,12 +802,7 @@ fn bar(cr: &cairo::Context, x: f64, y: f64, w: f64, frac: f64, color: (f64, f64,
 
 // --------------------------------------------------------------------- text
 
-/// Pango rather than cairo's toy text API: it kerns, it handles non-ASCII track
-/// titles, and it ellipsizes — all three show up the moment a real song plays.
-///
-/// Every argument is a distinct property of one run of text; bundling them into a
-/// struct would mean building one at each of the dozen call sites and reading no
-/// better for it.
+/// Pango text layout with support for tabular figures (`tnum`) on numbers.
 #[allow(clippy::too_many_arguments)]
 fn text(
     cr: &cairo::Context,
@@ -556,10 +814,11 @@ fn text(
     weight: pango::Weight,
     color: (f64, f64, f64, f64),
     align: pango::Alignment,
+    tnum: bool,
 ) {
     let layout = pangocairo::functions::create_layout(cr);
     let mut fd = pango::FontDescription::new();
-    fd.set_family("Sans");
+    fd.set_family(FONT_FAMILY);
     fd.set_weight(weight);
     fd.set_absolute_size(size * pango::SCALE as f64);
     layout.set_font_description(Some(&fd));
@@ -567,6 +826,11 @@ fn text(
     layout.set_width((w * pango::SCALE as f64) as i32);
     layout.set_ellipsize(pango::EllipsizeMode::End);
     layout.set_alignment(align);
+    if tnum {
+        let attrs = pango::AttrList::new();
+        attrs.insert(pango::AttrFontFeatures::new("tnum=1"));
+        layout.set_attributes(Some(&attrs));
+    }
     cr.move_to(x, y);
     rgba(cr, color);
     pangocairo::functions::show_layout(cr, &layout);
@@ -575,7 +839,7 @@ fn text(
 // --------------------------------------------------------------------- draw
 
 /// `t` is the panel's open-ness: 0 shut, 1 open, and a little past 1 while the
-/// spring overshoots — which is what gives the pop. `hot` highlights a menu row.
+/// spring overshoots. Content fades in over t 0.35->1.0 and is not drawn below 0.2.
 pub fn draw(
     cr: &cairo::Context,
     rings: &[Ring],
@@ -590,44 +854,46 @@ pub fn draw(
     let _ = cr.paint();
     cr.set_operator(cairo::Operator::Over);
 
-    if let (Some(rect), Some(tip), Some(o)) = (l.panel, l.tail, open)
+    if let (Some(rect), Some(o)) = (l.panel, open)
         && t > 0.004
     {
-        let _ = cr.save();
-        // Grow out of the tail tip rather than the panel's own centre: the
-        // panel should look like it came from the notch, not like it faded in
-        // somewhere nearby.
-        cr.translate(tip.0, tip.1);
-        let scale = 0.88 + 0.12 * t;
-        cr.scale(scale, scale);
-        cr.translate(-tip.0, -tip.1);
-        // One group, one alpha — otherwise the tail and the panel cross-fade
-        // against each other and the seam between them shows.
-        cr.push_group();
+        draw_ambient_shadow(cr, l.rail, edge, rect, t);
+        island_path(cr, l.rail, edge, rect, t, 0.0, 0.0);
+        rgba(cr, body_fill());
+        let _ = cr.fill();
 
-        tail_path(cr, tip, edge);
-        rgba(cr, body_fill());
-        let _ = cr.fill();
-        rounded(cr, rect, CARD_CORNER);
-        rgba(cr, body_fill());
-        let _ = cr.fill();
-        match o.kind {
-            Kind::Card => {
-                if let Some(ring) = rings.get(o.ring) {
-                    card(cr, rect, ring);
+        draw_rim_stroke(cr, l.rail, edge, rect, t);
+
+        if t >= 0.2 {
+            let content_alpha = ((t - 0.35) / 0.65).clamp(0.0, 1.0);
+            if content_alpha > 0.001 {
+                let _ = cr.save();
+                island_path(cr, l.rail, edge, rect, t, 0.0, 0.0);
+                cr.clip();
+                let draw_content = |cr: &cairo::Context| match o.kind {
+                    Kind::Card => {
+                        if let Some(ring) = rings.get(o.ring) {
+                            card(cr, rect, ring);
+                        }
+                    }
+                    Kind::Menu => menu(cr, rect, hot),
+                };
+                if content_alpha < 1.0 {
+                    cr.push_group();
+                    draw_content(cr);
+                    let _ = cr.pop_group_to_source();
+                    let _ = cr.paint_with_alpha(content_alpha);
+                } else {
+                    draw_content(cr);
                 }
+                let _ = cr.restore();
             }
-            Kind::Menu => menu(cr, rect, hot),
         }
-
-        let _ = cr.pop_group_to_source();
-        let _ = cr.paint_with_alpha(t.clamp(0.0, 1.0));
-        let _ = cr.restore();
+    } else {
+        notch_path(cr, l.rail, edge);
+        rgba(cr, body_fill());
+        let _ = cr.fill();
     }
-
-    notch_path(cr, l.rail, edge);
-    rgba(cr, body_fill());
-    let _ = cr.fill();
 
     for (i, (ring, &(cx, cy))) in rings.iter().zip(l.centers.iter()).enumerate() {
         let lit = match open {
@@ -642,7 +908,7 @@ fn menu(cr: &cairo::Context, rect: Rect, hot: Option<usize>) {
     for (i, item) in MENU.iter().enumerate() {
         let y = rect.y + MENU_PAD + i as f64 * MENU_ROW_H;
         if hot == Some(i) {
-            rounded(
+            squircle_path(
                 cr,
                 Rect {
                     x: rect.x + MENU_PAD * 0.4,
@@ -665,6 +931,7 @@ fn menu(cr: &cairo::Context, rect: Rect, hot: Option<usize>) {
             pango::Weight::Normal,
             TEXT,
             pango::Alignment::Left,
+            false,
         );
     }
 }
@@ -747,6 +1014,7 @@ fn ring_at(cr: &cairo::Context, ring: &Ring, cx: f64, cy: f64, lit: f64) {
             pango::Weight::Semibold,
             (TEXT.0, TEXT.1, TEXT.2, TEXT.3 * a),
             pango::Alignment::Center,
+            true,
         );
     }
 }
@@ -806,6 +1074,7 @@ fn card(cr: &cairo::Context, rect: Rect, ring: &Ring) {
         pango::Weight::Semibold,
         TEXT,
         pango::Alignment::Left,
+        false,
     );
     y += line(FONT_TITLE);
 
@@ -821,6 +1090,7 @@ fn card(cr: &cairo::Context, rect: Rect, ring: &Ring) {
             pango::Weight::Normal,
             TEXT_SECONDARY,
             pango::Alignment::Left,
+            false,
         );
         y += line(FONT_BODY);
     }
@@ -842,6 +1112,7 @@ fn card(cr: &cairo::Context, rect: Rect, ring: &Ring) {
             pango::Weight::Normal,
             TEXT,
             pango::Alignment::Left,
+            false,
         );
         if !row.note.is_empty() {
             text(
@@ -854,6 +1125,7 @@ fn card(cr: &cairo::Context, rect: Rect, ring: &Ring) {
                 pango::Weight::Normal,
                 TEXT_SECONDARY,
                 pango::Alignment::Right,
+                true,
             );
         }
         y += line(FONT_BODY);
@@ -872,6 +1144,7 @@ fn card(cr: &cairo::Context, rect: Rect, ring: &Ring) {
             pango::Weight::Normal,
             TEXT,
             pango::Alignment::Left,
+            true,
         );
         y += line(FONT_BODY);
     }
@@ -955,21 +1228,16 @@ mod tests {
     }
 
     #[test]
-    fn the_card_and_its_tail_stay_inside_the_window() {
+    fn the_card_stays_inside_the_window() {
         let rings: Vec<Ring> = (0..3).map(|_| ring(3)).collect();
         for edge in [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom] {
             for hover in 0..rings.len() {
                 let l = layout(&rings, edge, card_on(hover));
                 let c = l.panel.expect("hover opens a card");
-                let (tx, ty) = l.tail.expect("hover places a tail");
                 assert!(c.x >= 0.0 && c.y >= 0.0, "{edge:?} card off the top/left");
                 assert!(
                     c.x + c.w <= l.w + 0.01 && c.y + c.h <= l.h + 0.01,
                     "{edge:?} card overflows"
-                );
-                assert!(
-                    tx >= 0.0 && tx <= l.w && ty >= 0.0 && ty <= l.h,
-                    "{edge:?} tail tip outside the window"
                 );
             }
         }
@@ -1006,6 +1274,117 @@ mod tests {
         assert_eq!(band(1.5, None), CRITICAL);
         // An accent overrides the scale outright.
         assert_eq!(band(0.9, Some(FALLBACK)), FALLBACK);
+    }
+
+    #[test]
+    fn island_path_has_no_diagonal_rail_shortcuts_when_panel_clamped() {
+        let rings: Vec<Ring> = (0..3).map(|_| ring(3)).collect();
+        for edge in [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom] {
+            for hover in [0, rings.len() - 1] {
+                let l = layout(&rings, edge, card_on(hover));
+                let panel = l.panel.expect("hover opens a card");
+                let surf = cairo::ImageSurface::create(
+                    cairo::Format::ARgb32,
+                    l.w as i32 + 1,
+                    l.h as i32 + 1,
+                )
+                .unwrap();
+                let cr = cairo::Context::new(&surf).unwrap();
+                island_path(&cr, l.rail, edge, panel, 1.0, 0.0, 0.0);
+                let path = cr.copy_path().unwrap();
+                let mut prev = (0.0, 0.0);
+                for seg in path.iter() {
+                    match seg {
+                        cairo::PathSegment::MoveTo((x, y)) => prev = (x, y),
+                        cairo::PathSegment::LineTo((x, y)) => {
+                            let dx = (x - prev.0).abs();
+                            let dy = (y - prev.1).abs();
+                            assert!(
+                                dx < 1e-4 || dy < 1e-4,
+                                "{edge:?} hover {hover}: diagonal line from ({:.1}, {:.1}) to ({:.1}, {:.1}) (dx={:.1}, dy={:.1})",
+                                prev.0,
+                                prev.1,
+                                x,
+                                y,
+                                dx,
+                                dy
+                            );
+                            prev = (x, y);
+                        }
+                        cairo::PathSegment::CurveTo(_, _, (x, y)) => prev = (x, y),
+                        cairo::PathSegment::ClosePath => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// The outline is what clips the content, so it must reach every side of the
+    /// rect the content is laid out in — also when that rect reaches a rail end.
+    #[test]
+    fn island_outline_covers_the_content_rect_when_panel_reaches_a_rail_end() {
+        for count in [3, 4] {
+            let rings: Vec<Ring> = (0..count).map(|_| ring(3)).collect();
+            for edge in [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom] {
+                for hover in [0, rings.len() - 1] {
+                    let l = layout(&rings, edge, card_on(hover));
+                    let panel = l.panel.expect("hover opens a card");
+                    let surf = cairo::ImageSurface::create(
+                        cairo::Format::ARgb32,
+                        l.w as i32 + 1,
+                        l.h as i32 + 1,
+                    )
+                    .unwrap();
+                    let cr = cairo::Context::new(&surf).unwrap();
+                    island_path(&cr, l.rail, edge, panel, 1.0, 0.0, 0.0);
+                    let (x1, y1, x2, y2) = cr.path_extents().unwrap();
+                    let eps = 0.01;
+                    assert!(
+                        x1 <= panel.x + eps
+                            && y1 <= panel.y + eps
+                            && x2 >= panel.x + panel.w - eps
+                            && y2 >= panel.y + panel.h - eps,
+                        "{edge:?} n={count} hover={hover}: outline ({x1:.1}, {y1:.1})-({x2:.1}, {y2:.1}) \
+                         does not cover content {panel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn centered_panel_and_notch_flares_are_mirror_symmetric() {
+        let rings: Vec<Ring> = (0..3).map(|_| ring(3)).collect();
+        let l = layout(&rings, Edge::Right, None);
+        let mid = l.rail.h / 2.0;
+        let card_h = 40.0;
+        let centered_panel = Rect {
+            x: l.rail.x - 50.0,
+            y: mid - card_h / 2.0,
+            w: 50.0,
+            h: card_h,
+        };
+        let geom = IslandGeom::new(l.rail, Edge::Right, centered_panel, 1.0, 0.0, 0.0);
+        assert!(
+            (geom.v1 - (mid - card_h / 2.0)).abs() < 1e-4,
+            "v1 should be centered around mid"
+        );
+        assert!(
+            (geom.v2 - (mid + card_h / 2.0)).abs() < 1e-4,
+            "v2 should be centered around mid"
+        );
+        assert!(
+            (geom.rf_left - geom.rf_right).abs() < 1e-4,
+            "fillet radii are not mirror symmetric: left={:.2}, right={:.2}",
+            geom.rf_left,
+            geom.rf_right
+        );
+        assert!(
+            (geom.top - (geom.length - geom.bottom)).abs() < 1e-4,
+            "flares are not mirror symmetric: top={:.2}, bottom_dist={:.2}",
+            geom.top,
+            geom.length - geom.bottom
+        );
     }
 }
 
@@ -1071,60 +1450,111 @@ fn preview() {
         },
     ];
 
-    let shut = layout(&rings, Edge::Right, None);
-    let open = layout(
-        &rings,
-        Edge::Right,
-        Some(Open {
-            ring: 0,
-            kind: Kind::Card,
-        }),
-    );
-    let menu = layout(
-        &rings,
-        Edge::Right,
-        Some(Open {
-            ring: 2,
-            kind: Kind::Menu,
-        }),
-    );
-    let (pad, gap) = (26.0, 26.0);
-    let w = (pad * 2.0 + shut.w + gap + open.w + gap + menu.w) as i32;
-    let h = (pad * 2.0 + shut.h.max(open.h)) as i32;
+    let pad = 26.0;
+    let gap = 26.0;
 
-    let surf = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap();
-    let cr = cairo::Context::new(&surf).unwrap();
-    for (l, open, hot, x) in [
-        (&shut, None, None, pad),
-        (
-            &open,
-            Some(Open {
-                ring: 0,
-                kind: Kind::Card,
-            }),
-            None,
-            pad + shut.w + gap,
-        ),
-        (
-            &menu,
-            Some(Open {
-                ring: 2,
-                kind: Kind::Menu,
-            }),
-            Some(0),
-            pad + shut.w + gap + open.w + gap,
-        ),
-    ] {
-        cr.save().unwrap();
-        cr.translate(x, pad);
-        cr.rectangle(0.0, 0.0, l.w, l.h);
-        cr.clip();
-        draw(&cr, &rings, l, Edge::Right, open, 1.0, hot);
-        cr.restore().unwrap();
+    let edges = [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom];
+    struct RowInfo {
+        edge: Edge,
+        items: Vec<(Layout, Option<Open>, f64, Option<usize>)>,
+        w: f64,
+        h: f64,
     }
-    // draw() clears its own clip first, so the backdrop goes on underneath.
+
+    let rows: Vec<RowInfo> = edges
+        .into_iter()
+        .map(|edge| {
+            let shut = layout(&rings, edge, None);
+            let card_half = layout(
+                &rings,
+                edge,
+                Some(Open {
+                    ring: 0,
+                    kind: Kind::Card,
+                }),
+            );
+            let card_full = layout(
+                &rings,
+                edge,
+                Some(Open {
+                    ring: 0,
+                    kind: Kind::Card,
+                }),
+            );
+            let menu = layout(
+                &rings,
+                edge,
+                Some(Open {
+                    ring: 2,
+                    kind: Kind::Menu,
+                }),
+            );
+
+            let items = vec![
+                (shut, None, 0.0, None),
+                (
+                    card_half,
+                    Some(Open {
+                        ring: 0,
+                        kind: Kind::Card,
+                    }),
+                    0.5,
+                    None,
+                ),
+                (
+                    card_full,
+                    Some(Open {
+                        ring: 0,
+                        kind: Kind::Card,
+                    }),
+                    1.0,
+                    None,
+                ),
+                (
+                    menu,
+                    Some(Open {
+                        ring: 2,
+                        kind: Kind::Menu,
+                    }),
+                    1.0,
+                    Some(0),
+                ),
+            ];
+
+            let w = pad * 2.0
+                + items.iter().map(|(l, ..)| l.w).sum::<f64>()
+                + gap * (items.len() - 1) as f64;
+            let h = items.iter().map(|(l, ..)| l.h).fold(0.0_f64, f64::max);
+
+            RowInfo { edge, items, w, h }
+        })
+        .collect();
+
+    let total_w = rows.iter().map(|r| r.w).fold(0.0_f64, f64::max) as i32;
+    let total_h =
+        (pad * 2.0 + rows.iter().map(|r| r.h).sum::<f64>() + gap * (rows.len() - 1) as f64) as i32;
+
+    let surf = cairo::ImageSurface::create(cairo::Format::ARgb32, total_w, total_h).unwrap();
+    let cr = cairo::Context::new(&surf).unwrap();
+
+    let mut y_cursor = pad;
+    for row in &rows {
+        let mut x_cursor = pad;
+        for (l, open, t, hot) in &row.items {
+            cr.save().unwrap();
+            cr.translate(x_cursor, y_cursor);
+            cr.rectangle(0.0, 0.0, l.w, l.h);
+            cr.clip();
+            draw(&cr, &rings, l, row.edge, *open, *t, *hot);
+            cr.restore().unwrap();
+            x_cursor += l.w + gap;
+        }
+        y_cursor += row.h + gap;
+    }
+
+    // Backdrop gradient underneath
     cr.set_operator(cairo::Operator::DestOver);
-    let g = cairo::LinearGradient::new(0.0, 0.0, w as f64, h as f64);
+    let g = cairo::LinearGradient::new(0.0, 0.0, total_w as f64, total_h as f64);
     g.add_color_stop_rgb(0.0, 0.16, 0.55, 0.62);
     g.add_color_stop_rgb(0.5, 0.42, 0.32, 0.22);
     g.add_color_stop_rgb(1.0, 0.10, 0.38, 0.45);
@@ -1134,5 +1564,5 @@ fn preview() {
 
     let mut f = std::fs::File::create("/tmp/linotch-preview.png").unwrap();
     surf.write_to_png(&mut f).unwrap();
-    eprintln!("wrote /tmp/linotch-preview.png ({w}x{h})");
+    eprintln!("wrote /tmp/linotch-preview.png ({total_w}x{total_h})");
 }

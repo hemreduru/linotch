@@ -370,10 +370,13 @@ fn backoff(fails: u32) -> Duration {
 
 // ---------------------------------------------------------------------- UI
 
-/// Spring, not an ease: a critically-under-damped one overshoots slightly on the
-/// way in, which is the "pop", and settles without a second bounce.
-const STIFFNESS: f64 = 210.0;
-const DAMPING: f64 = 22.0;
+/// Open spring: small visible pop (~1–2% overshoot), settles in ~250–350 ms.
+const STIFFNESS_OPEN: f64 = 324.0;
+const DAMPING_OPEN: f64 = 28.8; // ζ = 28.8 / (2 * √324) = 0.80
+
+/// Close spring: critically damped snap back (no bounce), settles in ~250–350 ms.
+const STIFFNESS_CLOSE: f64 = 1764.0;
+const DAMPING_CLOSE: f64 = 84.0; // ζ = 84.0 / (2 * √1764) = 1.00
 const FRAME: Duration = Duration::from_millis(16);
 /// How far the pointer may travel before a press counts as a drag rather than a
 /// click. Below this a shaky click on the media ring would start dragging.
@@ -440,7 +443,12 @@ impl Ui {
 
     /// One spring step. Returns false once it has settled, which ends the timer.
     fn step(&mut self, dt: f64) -> bool {
-        let a = -STIFFNESS * (self.t - self.target) - DAMPING * self.vel;
+        let (stiffness, damping) = if self.target > 0.0 {
+            (STIFFNESS_OPEN, DAMPING_OPEN)
+        } else {
+            (STIFFNESS_CLOSE, DAMPING_CLOSE)
+        };
+        let a = -stiffness * (self.t - self.target) - damping * self.vel;
         self.vel += a * dt;
         self.t += self.vel * dt;
         if (self.t - self.target).abs() < 0.002 && self.vel.abs() < 0.02 {
@@ -829,8 +837,27 @@ impl Ctx {
         self.area.queue_draw();
     }
 
+    fn animations_enabled() -> bool {
+        gtk::Settings::default()
+            .map(|s| s.is_gtk_enable_animations())
+            .unwrap_or(true)
+    }
+
     /// Start the 60 Hz spring timer, unless one is already running.
     fn animate(&self) {
+        if !Self::animations_enabled() {
+            let mut u = self.ui.borrow_mut();
+            u.t = u.target;
+            u.vel = 0.0;
+            if u.target == 0.0 {
+                u.panel = None;
+                u.hot = None;
+            }
+            drop(u);
+            self.apply();
+            self.area.queue_draw();
+            return;
+        }
         if self.ui.borrow().animating {
             return;
         }
@@ -1094,5 +1121,78 @@ mod tests {
         assert_eq!(clock(74.0), "1:14");
         assert_eq!(clock(3671.0), "1:01:11");
         assert_eq!(clock(-5.0), "0:00");
+    }
+
+    #[test]
+    fn spring_open_and_close_settle_dynamics() {
+        let mut ui = Ui {
+            preferred_monitor: None,
+            current_monitor: "test".into(),
+            current_rect: None,
+            edge: Edge::Top,
+            offset: 0.5,
+            quitting: false,
+            lost: false,
+            panel: Some(draw::Open {
+                ring: 0,
+                kind: draw::Kind::Card,
+            }),
+            target: 1.0,
+            t: 0.0,
+            vel: 0.0,
+            hot: None,
+            drag: None,
+            animating: true,
+            shown: ((0, 0), None),
+        };
+
+        let dt = FRAME.as_secs_f64();
+        let mut open_steps = 0;
+        let mut max_t = 0.0;
+        loop {
+            open_steps += 1;
+            let running = ui.step(dt);
+            if ui.t > max_t {
+                max_t = ui.t;
+            }
+            if !running {
+                break;
+            }
+            assert!(open_steps < 100, "open took too long to settle");
+        }
+        let open_duration = open_steps as f64 * dt;
+        let overshoot = (max_t - 1.0).max(0.0);
+        assert!(
+            open_duration <= 0.4,
+            "open must settle within 0.4s, took {open_duration:.3}s"
+        );
+        assert!(
+            overshoot < 0.04,
+            "overshoot must be < 4%, was {:.2}%",
+            overshoot * 100.0
+        );
+        assert_eq!(ui.t, 1.0);
+
+        ui.close();
+        let mut close_steps = 0;
+        loop {
+            close_steps += 1;
+            let running = ui.step(dt);
+            assert!(
+                ui.t >= 0.0,
+                "close must never go below 0 (no negative t), got {}",
+                ui.t
+            );
+            if !running {
+                break;
+            }
+            assert!(close_steps < 100, "close took too long to settle");
+        }
+        let close_duration = close_steps as f64 * dt;
+        assert!(
+            close_duration <= 0.35,
+            "close must settle within 0.35s, took {close_duration:.3}s"
+        );
+        assert_eq!(ui.t, 0.0);
     }
 }
