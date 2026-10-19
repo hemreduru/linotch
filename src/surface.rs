@@ -75,6 +75,12 @@ pub trait Surface {
     /// does the once-only setup.
     fn set_edge(&self, _w: &gtk::ApplicationWindow, _edge: Edge) {}
 
+    /// False when the compositor owns the window's position and monitor, so
+    /// monitor changes are none of the notch's business.
+    fn follows_monitors(&self) -> bool {
+        true
+    }
+
     /// Pin the surface to a specific monitor.
     fn set_monitor(&self, _w: &gtk::ApplicationWindow, _mon: &gdk::Monitor) {}
 
@@ -255,6 +261,10 @@ pub struct Floating;
 impl Surface for Floating {
     fn name(&self) -> &'static str {
         "floating (no layer-shell)"
+    }
+
+    fn follows_monitors(&self) -> bool {
+        false
     }
 
     fn prepare(
@@ -484,6 +494,21 @@ impl MonitorSpec {
     }
 }
 
+/// Whether a monitor's geometry differs enough from the one the notch was placed
+/// against to need placing again. Layer-shell margins are monitor-local, so only
+/// the size matters there; `compare_origin` adds x/y for servers that place by
+/// global coordinate.
+pub fn placement_changed(old: Option<MonitorRect>, new: MonitorRect, compare_origin: bool) -> bool {
+    match old {
+        None => true,
+        Some(o) => {
+            o.width != new.width
+                || o.height != new.height
+                || (compare_origin && (o.x != new.x || o.y != new.y))
+        }
+    }
+}
+
 pub fn select_monitor(monitors: &[MonitorSpec], saved: Option<&str>) -> usize {
     if monitors.is_empty() {
         return 0;
@@ -654,5 +679,25 @@ mod tests {
 
         // 4. No preferred monitor: primary wins
         assert_eq!(select_monitor(&both, None), 0);
+    }
+
+    #[test]
+    fn placement_is_stale_only_when_it_matters() {
+        let a = MonitorRect::new(0, 0, 1920, 1080);
+        let moved = MonitorRect::new(1920, 0, 1920, 1080);
+        let resized = MonitorRect::new(0, 0, 1280, 720);
+
+        // Nothing placed yet.
+        assert!(placement_changed(None, a, false));
+        // Same output, same size: nothing to redo.
+        assert!(!placement_changed(Some(a), a, false));
+        assert!(!placement_changed(Some(a), a, true));
+        // Layer-shell margins are monitor-local, so a new origin alone is harmless...
+        assert!(!placement_changed(Some(a), moved, false));
+        // ...but X11 places by global coordinate.
+        assert!(placement_changed(Some(a), moved, true));
+        // A new size matters everywhere.
+        assert!(placement_changed(Some(a), resized, false));
+        assert!(placement_changed(Some(a), resized, true));
     }
 }

@@ -397,6 +397,9 @@ struct Ui {
     current_monitor: String,
     /// Geometry of the current monitor, used to deduplicate monitor-change events.
     current_rect: Option<surface::MonitorRect>,
+    /// The layer surface was closed by the compositor (its output went away) and the
+    /// window is hidden until a monitor is available again. Re-checked by the slow tick.
+    lost: bool,
     edge: Edge,
     offset: f64,
     /// Set when Quit is selected from the menu so delete-event does not block application exit.
@@ -509,6 +512,7 @@ fn build_ui(
         preferred_monitor: saved_mon,
         current_monitor: mon_name,
         current_rect: initial_rect,
+        lost: false,
         edge,
         offset,
         quitting: false,
@@ -659,7 +663,8 @@ fn build_ui(
                 return glib::Propagation::Stop;
             };
             if drag.moved {
-                let u = ctx.ui.borrow();
+                let mut u = ctx.ui.borrow_mut();
+                u.preferred_monitor = Some(u.current_monitor.clone());
                 config::Config::save(u.preferred_monitor.as_deref(), u.edge, u.offset);
                 return glib::Propagation::Stop;
             }
@@ -687,15 +692,20 @@ fn build_ui(
     // gtk_window_close(), which emits delete-event on GtkWindow.
     // If not intercepted, GtkWindow is destroyed, and with 0 windows left GtkApplication
     // exits with code 0.
-    // Intercepting delete-event with Propagation::Stop keeps the window alive and triggers
-    // re-mapping onto the remaining active output. Menu Quit is tracked via `quitting` so it still exits.
+    // Intercepting delete-event with Propagation::Stop keeps the window alive. It is
+    // hidden first, so the placement dedupe guard sees it unmapped, and `lost` makes
+    // the slow tick re-place it once an output is available (re-placing right here
+    // could land on the output that is still going away). Menu Quit is tracked via
+    // `quitting` so it still exits, and only layer-shell windows are ever swallowed:
+    // a window manager's close request on X11 or GNOME must keep working.
     win.connect_delete_event({
         let ctx = Ctx::new(&win, &area, &surface, &shared, &ui);
         move |_, _| {
-            if ctx.ui.borrow().quitting {
+            if ctx.ui.borrow().quitting || !gtk_layer_shell::LayerShell::is_layer_window(&ctx.win) {
                 return glib::Propagation::Proceed;
             }
-            ctx.on_monitors_changed();
+            ctx.win.hide();
+            ctx.ui.borrow_mut().lost = true;
             glib::Propagation::Stop
         }
     });
@@ -714,6 +724,9 @@ fn build_ui(
     // Slow tick: the ring count and the media progress arc. The spring runs on its
     // own timer only while it is moving.
     glib::timeout_add_local(Duration::from_secs(1), move || {
+        if ctx.ui.borrow().lost {
+            ctx.on_monitors_changed();
+        }
         ctx.apply();
         ctx.area.queue_draw();
         glib::ControlFlow::Continue
@@ -778,29 +791,42 @@ impl Ctx {
     }
 
     fn on_monitors_changed(&self) {
-        if let Some((_, new_name, mon_rect, gdk_mon)) = self.active_monitor() {
-            let (edge, offset, size) = {
-                let mut u = self.ui.borrow_mut();
-                if u.current_monitor == new_name
-                    && u.current_rect == Some(mon_rect)
-                    && self.win.is_mapped()
-                {
-                    return;
-                }
-                u.current_monitor = new_name;
-                u.current_rect = Some(mon_rect);
-                let size = u.shown.0;
-                u.shown = ((0, 0), None);
-                (u.edge, u.offset, size)
-            };
-            self.win.hide();
-            self.surface.set_monitor(&self.win, &gdk_mon);
-            self.surface.set_edge(&self.win, edge);
-            self.surface.place(&self.win, &mon_rect, edge, offset, size);
-            self.win.show();
-            self.apply();
-            self.area.queue_draw();
+        if !self.surface.follows_monitors() {
+            return;
         }
+        let Some((_, new_name, mon_rect, gdk_mon)) = self.active_monitor() else {
+            // No output at all. Unmapped, so nothing can map against a stale monitor
+            // and the guard below falls through once an output returns.
+            self.win.hide();
+            self.ui.borrow_mut().lost = true;
+            return;
+        };
+        let compare_origin = !gtk_layer_shell::LayerShell::is_layer_window(&self.win);
+        let (edge, offset, size) = {
+            let mut u = self.ui.borrow_mut();
+            if !u.lost
+                && u.current_monitor == new_name
+                && !surface::placement_changed(u.current_rect, mon_rect, compare_origin)
+                && self.win.is_mapped()
+            {
+                return;
+            }
+            u.lost = false;
+            u.current_monitor = new_name;
+            u.current_rect = Some(mon_rect);
+            let size = u.shown.0;
+            u.shown = ((0, 0), None);
+            (u.edge, u.offset, size)
+        };
+        self.win.hide();
+        self.surface.set_monitor(&self.win, &gdk_mon);
+        self.surface.set_edge(&self.win, edge);
+        self.surface.place(&self.win, &mon_rect, edge, offset, size);
+        if !self.rings().is_empty() {
+            self.win.show();
+        }
+        self.apply();
+        self.area.queue_draw();
     }
 
     /// Start the 60 Hz spring timer, unless one is already running.
@@ -850,7 +876,11 @@ impl Ctx {
         if was.0 != size {
             self.area.set_size_request(size.0, size.1);
             self.win.resize(size.0, size.1);
-            self.win.show();
+            // Mapping against a vanished output would hand gtk-layer-shell a stale
+            // monitor; on_monitors_changed shows the window once there is one.
+            if self.active_monitor().is_some() {
+                self.win.show();
+            }
             // Only the length along the edge needs re-anchoring; a change in depth
             // the edge anchor absorbs on its own. And re-anchoring reads the
             // window's size back, which right after a resize can still be the old
