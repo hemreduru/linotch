@@ -499,14 +499,6 @@ pub fn select_monitor(monitors: &[MonitorSpec], saved: Option<&str>) -> usize {
     0
 }
 
-/// Pure monitor resolution: given the user's preferred monitor name and the current list
-/// of connected monitors, determine which monitor index to place the notch on.
-/// If the preferred monitor is available, it is always chosen (even after temporary disconnection).
-/// If not available, falls back to the primary monitor, or the first available monitor.
-pub fn resolve_monitor(monitors: &[MonitorSpec], preferred: Option<&str>) -> usize {
-    select_monitor(monitors, preferred)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,17 +642,17 @@ mod tests {
 
         // 1. Both outputs connected: preferred HEADLESS-2 wins over primary HEADLESS-1
         let both = vec![h1.clone(), h2.clone()];
-        assert_eq!(resolve_monitor(&both, preferred), 1);
+        assert_eq!(select_monitor(&both, preferred), 1);
 
         // 2. HEADLESS-2 disabled/disconnected: falls back to remaining output (HEADLESS-1 at index 0)
         let only_h1 = vec![h1.clone()];
-        assert_eq!(resolve_monitor(&only_h1, preferred), 0);
+        assert_eq!(select_monitor(&only_h1, preferred), 0);
 
         // 3. HEADLESS-2 re-enabled: with preferred STILL "HEADLESS-2", notch returns to HEADLESS-2
         let reconnected = vec![h1.clone(), h2.clone()];
-        assert_eq!(resolve_monitor(&reconnected, preferred), 1);
+        assert_eq!(select_monitor(&reconnected, preferred), 1);
 
         // 4. No preferred monitor: primary wins
-        assert_eq!(resolve_monitor(&both, None), 0);
+        assert_eq!(select_monitor(&both, None), 0);
     }
 }

@@ -479,7 +479,7 @@ fn build_ui(
     let display = win.display();
     let mons = surface::enumerate_monitors(&display, screen.as_ref());
     let specs: Vec<surface::MonitorSpec> = mons.iter().map(|(s, _, _)| s.clone()).collect();
-    let mon_idx = surface::resolve_monitor(&specs, saved_mon.as_deref());
+    let mon_idx = surface::select_monitor(&specs, saved_mon.as_deref());
     let (mon_name, gdk_mon) = if !mons.is_empty() {
         (
             specs[mon_idx].identifier(mon_idx),
@@ -771,7 +771,7 @@ impl Ctx {
             let u = self.ui.borrow();
             u.preferred_monitor.clone()
         };
-        let idx = surface::resolve_monitor(&specs, preferred.as_deref());
+        let idx = surface::select_monitor(&specs, preferred.as_deref());
         let name = specs[idx].identifier(idx);
         let (_spec, rect, gdk_mon) = mons[idx].clone();
         Some((idx, name, rect, gdk_mon))
@@ -979,7 +979,7 @@ impl Ctx {
 /// be clearly nearer, not merely nearer, before the notch moves.
 const STICK: f64 = 0.7;
 
-pub fn edge_for(px: f64, py: f64, mw: f64, mh: f64, current: Edge) -> Edge {
+fn edge_for(px: f64, py: f64, mw: f64, mh: f64, current: Edge) -> Edge {
     // Distances are in halves of the screen, not pixels. On a 16:9 display the
     // exact centre is 540px from the top and 960px from the side, so raw pixels
     // call the middle of the screen "near the top" and the notch jumps there while
