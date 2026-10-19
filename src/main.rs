@@ -1132,6 +1132,7 @@ mod tests {
             edge: Edge::Top,
             offset: 0.5,
             quitting: false,
+            lost: false,
             panel: Some(draw::Open {
                 ring: 0,
                 kind: draw::Kind::Card,
@@ -1195,4 +1196,3 @@ mod tests {
         assert_eq!(ui.t, 0.0);
     }
 }
-

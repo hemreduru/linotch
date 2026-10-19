@@ -259,6 +259,9 @@ fn card_height(ring: &Ring) -> f64 {
     2.0 * CARD_PAD + line(FONT_TITLE) + note + body
 }
 
+/// Room for the 24px ambient elevation shadow (spec 5.2).
+pub const SHADOW_PAD: f64 = 24.0;
+
 /// `hover` decides whether a card is drawn and where it points — but **not** how
 /// long the window is.
 ///
@@ -274,7 +277,7 @@ pub fn layout(rings: &[Ring], edge: Edge, open: Option<Open>) -> Layout {
         .max(menu_height());
     let depth = thick
         + if open.is_some() {
-            max_panel_depth(rings, edge)
+            max_panel_depth(rings, edge) + SHADOW_PAD
         } else {
             0.0
         };
@@ -517,8 +520,17 @@ fn canonical_panel(rect: Rect, rail: Rect, edge: Edge) -> CanonicalPanel {
 
 /// The unified Dynamic Island body: rail + panel as one continuous topological shape,
 /// with smooth concave fillets joining the rail into the panel and continuous-curvature
-/// squircles on all corners. Morph smoothly with parameter `t`.
-fn island_path(cr: &cairo::Context, rail: Rect, edge: Edge, panel: Rect, t: f64) {
+/// squircles on all corners. Morph smoothly with parameter `t`. Supports outward `offset`
+/// and concentric `expand` for the ambient elevation shadow.
+fn island_path(
+    cr: &cairo::Context,
+    rail: Rect,
+    edge: Edge,
+    panel: Rect,
+    t: f64,
+    offset: f64,
+    expand: f64,
+) {
     let (thick, length) = if edge.vertical() {
         (rail.w, rail.h)
     } else {
@@ -532,22 +544,27 @@ fn island_path(cr: &cairo::Context, rail: Rect, edge: Edge, panel: Rect, t: f64)
 
     let canon = canonical_panel(panel, rail, edge);
     let t_geom = t.clamp(0.0, 1.05);
-    let d = (canon.depth * t_geom).max(0.0);
+    let base_d = (canon.depth * t_geom).max(0.0);
 
-    if d < 0.5 {
+    if base_d < 0.5 {
         notch_path(cr, rail, edge);
         return;
     }
 
+    let d = (base_d + offset + expand).max(0.0);
+
     let v_mid = (canon.v1 + canon.v2) / 2.0;
     let target_hw = (canon.v2 - canon.v1) / 2.0;
     let init_hw = (RING_D / 2.0).min(target_hw);
-    let hw = init_hw + (target_hw - init_hw) * t.clamp(0.0, 1.0);
+    let hw = (init_hw + (target_hw - init_hw) * t.clamp(0.0, 1.0) + expand).max(0.0);
 
     let v1 = (v_mid - hw).max(0.0);
     let v2 = (v_mid + hw).min(length);
 
-    let rc = CARD_CORNER.min(d / 2.0).min((v2 - v1) / 2.0).max(0.0);
+    let rc = (CARD_CORNER + expand)
+        .min(d / 2.0)
+        .min((v2 - v1) / 2.0)
+        .max(0.0);
 
     let avail_left = v1 - (top + corner);
     let rf_left = if avail_left > 0.0 {
@@ -698,6 +715,23 @@ fn island_path(cr: &cairo::Context, rail: Rect, edge: Edge, panel: Rect, t: f64)
     }
     cr.close_path();
     let _ = cr.restore();
+}
+
+/// 3-tier concentric ambient gradient shadow (Apple elevation shadow, spec 5.2):
+/// 1. Atmospheric feather: offset 6px downward, expand 18px, alpha 0.08
+/// 2. Ambient bloom: offset 3px downward, expand 8px, alpha 0.18
+/// 3. Contact shadow: offset 1px downward, expand 2px, alpha 0.35
+fn draw_ambient_shadow(cr: &cairo::Context, rail: Rect, edge: Edge, panel: Rect, t: f64) {
+    if t <= 0.05 {
+        return;
+    }
+    let shadow_alpha = ((t - 0.1) / 0.9).clamp(0.0, 1.0);
+    const PASSES: [(f64, f64, f64); 3] = [(6.0, 18.0, 0.08), (3.0, 8.0, 0.18), (1.0, 2.0, 0.35)];
+    for (offset, expand, alpha) in PASSES {
+        island_path(cr, rail, edge, panel, t, offset, expand);
+        cr.set_source_rgba(0.0, 0.0, 0.0, alpha * shadow_alpha);
+        let _ = cr.fill();
+    }
 }
 
 /// 1px luminous rim highlight along the panel perimeter, rendered with a subtle
@@ -868,14 +902,7 @@ fn squircle_path(cr: &cairo::Context, rect: Rect, r: f64) {
         y + h - r,
     );
     cr.line_to(x, y + r);
-    cr.curve_to(
-        x,
-        y + r - r * KAPPA1,
-        x + r * (1.0 - KAPPA2),
-        y,
-        x + r,
-        y,
-    );
+    cr.curve_to(x, y + r - r * KAPPA1, x + r * (1.0 - KAPPA2), y, x + r, y);
     cr.close_path();
 }
 
@@ -955,7 +982,8 @@ pub fn draw(
     if let (Some(rect), Some(o)) = (l.panel, open)
         && t > 0.004
     {
-        island_path(cr, l.rail, edge, rect, t);
+        draw_ambient_shadow(cr, l.rail, edge, rect, t);
+        island_path(cr, l.rail, edge, rect, t, 0.0, 0.0);
         rgba(cr, body_fill());
         let _ = cr.fill();
 
@@ -965,7 +993,7 @@ pub fn draw(
             let content_alpha = ((t - 0.35) / 0.65).clamp(0.0, 1.0);
             if content_alpha > 0.001 {
                 let _ = cr.save();
-                island_path(cr, l.rail, edge, rect, t);
+                island_path(cr, l.rail, edge, rect, t, 0.0, 0.0);
                 cr.clip();
                 cr.push_group();
                 match o.kind {
@@ -1512,9 +1540,8 @@ fn preview() {
         .collect();
 
     let total_w = rows.iter().map(|r| r.w).fold(0.0_f64, f64::max) as i32;
-    let total_h = (pad * 2.0
-        + rows.iter().map(|r| r.h).sum::<f64>()
-        + gap * (rows.len() - 1) as f64) as i32;
+    let total_h =
+        (pad * 2.0 + rows.iter().map(|r| r.h).sum::<f64>() + gap * (rows.len() - 1) as f64) as i32;
 
     let surf = cairo::ImageSurface::create(cairo::Format::ARgb32, total_w, total_h).unwrap();
     let cr = cairo::Context::new(&surf).unwrap();
