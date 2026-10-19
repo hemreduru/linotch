@@ -92,7 +92,7 @@ fn main() {
     }
 
     reexec_under_xwayland();
-    let (edge, offset) = config::Config::load();
+    let (saved_mon, edge, offset) = config::Config::load();
     if let Some(o) = std::env::var("LINOTCH_OPACITY")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -109,7 +109,7 @@ fn main() {
     let app = gtk::Application::builder()
         .application_id("dev.linotch.Linotch")
         .build();
-    app.connect_activate(move |app| build_ui(app, Arc::clone(&shared), edge, offset));
+    app.connect_activate(move |app| build_ui(app, Arc::clone(&shared), saved_mon.clone(), edge, offset));
     // GTK must not see our own flags; they were handled above.
     app.run_with_args::<&str>(&[]);
 }
@@ -124,6 +124,7 @@ USAGE:
     linotch --version
 
 ENVIRONMENT:
+    LINOTCH_MONITOR=name                 monitor connector or model (e.g. DP-1)
     LINOTCH_EDGE=right|left|top|bottom   screen edge to hug        (default: right)
     LINOTCH_OFFSET=0.0..1.0              position along that edge  (default: 0.5)
     LINOTCH_OPACITY=0.35..1.0            panel opacity             (default: 1.0)
@@ -387,6 +388,7 @@ struct Drag {
 }
 
 struct Ui {
+    monitor_name: String,
     edge: Edge,
     offset: f64,
     /// The panel being drawn. Outlives `target` going to zero, so the close
@@ -446,18 +448,29 @@ impl Ui {
     }
 }
 
-fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offset: f64) {
+fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, saved_mon: Option<String>, edge: Edge, offset: f64) {
     let surface: Rc<dyn surface::Surface> = surface::detect().into();
     eprintln!("linotch: surface = {}", surface.name());
 
     let win = gtk::ApplicationWindow::new(app);
     win.set_app_paintable(true);
     win.set_resizable(false);
-    // Without an ARGB visual the panel's corners come out black instead of clear.
-    if let Some(v) = gtk::prelude::WidgetExt::screen(&win).and_then(|s| s.rgba_visual()) {
+    let screen = gtk::prelude::WidgetExt::screen(&win).or_else(gdk::Screen::default);
+    if let Some(v) = screen.as_ref().and_then(|s| s.rgba_visual()) {
         win.set_visual(Some(&v));
     }
-    surface.prepare(&win, edge, offset);
+
+    let display = win.display();
+    let mons = surface::enumerate_monitors(&display, screen.as_ref());
+    let specs: Vec<surface::MonitorSpec> = mons.iter().map(|(s, _, _)| s.clone()).collect();
+    let mon_idx = surface::select_monitor(&specs, saved_mon.as_deref());
+    let (mon_name, _mon_rect, gdk_mon) = if !mons.is_empty() {
+        (specs[mon_idx].identifier(mon_idx), mons[mon_idx].1, Some(mons[mon_idx].2.clone()))
+    } else {
+        ("default".into(), surface::MonitorRect::new(0, 0, 1920, 1080), None)
+    };
+
+    surface.prepare(&win, gdk_mon.as_ref(), edge, offset);
 
     let area = gtk::DrawingArea::new();
     area.add_events(
@@ -469,6 +482,7 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
     win.add(&area);
 
     let ui = Rc::new(RefCell::new(Ui {
+        monitor_name: mon_name,
         edge,
         offset,
         panel: None,
@@ -616,7 +630,7 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
             };
             if drag.moved {
                 let u = ctx.ui.borrow();
-                config::Config::save(u.edge, u.offset);
+                config::Config::save(Some(&u.monitor_name), u.edge, u.offset);
                 return glib::Propagation::Stop;
             }
             // Not a drag, so it was a click.
@@ -637,6 +651,13 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, edge: Edge, offs
             glib::Propagation::Stop
         }
     });
+
+    if let Some(screen) = screen {
+        let ctx = Ctx::new(&win, &area, &surface, &shared, &ui);
+        screen.connect_monitors_changed(move |_| {
+            ctx.on_monitors_changed();
+        });
+    }
 
     win.show_all();
     let ctx = Ctx::new(&win, &area, &surface, &shared, &ui);
@@ -684,6 +705,43 @@ impl Ctx {
             .lock()
             .map(|g| g.rings.clone())
             .unwrap_or_default()
+    }
+
+    fn monitors(&self) -> Vec<(surface::MonitorSpec, surface::MonitorRect, gdk::Monitor)> {
+        let display = self.win.display();
+        let screen = gtk::prelude::WidgetExt::screen(&self.win);
+        surface::enumerate_monitors(&display, screen.as_ref())
+    }
+
+    fn active_monitor(&self) -> Option<(usize, String, surface::MonitorRect, gdk::Monitor)> {
+        let mons = self.monitors();
+        if mons.is_empty() {
+            return None;
+        }
+        let specs: Vec<surface::MonitorSpec> = mons.iter().map(|(s, _, _)| s.clone()).collect();
+        let saved = {
+            let u = self.ui.borrow();
+            u.monitor_name.clone()
+        };
+        let idx = surface::select_monitor(&specs, Some(&saved));
+        let name = specs[idx].identifier(idx);
+        let (_spec, rect, gdk_mon) = mons[idx].clone();
+        Some((idx, name, rect, gdk_mon))
+    }
+
+    fn on_monitors_changed(&self) {
+        if let Some((_, new_name, mon_rect, gdk_mon)) = self.active_monitor() {
+            let (edge, offset, size) = {
+                let mut u = self.ui.borrow_mut();
+                u.monitor_name = new_name;
+                (u.edge, u.offset, u.shown.0)
+            };
+            self.surface.set_monitor(&self.win, &gdk_mon);
+            self.surface.set_edge(&self.win, edge);
+            self.surface.place(&self.win, &mon_rect, edge, offset, size);
+            self.apply();
+            self.area.queue_draw();
+        }
     }
 
     /// Start the 60 Hz spring timer, unless one is already running.
@@ -735,62 +793,19 @@ impl Ctx {
             self.win.resize(size.0, size.1);
             self.win.show();
             // Only the length along the edge needs re-anchoring; a change in depth
-            // the edge anchor absorbs on its own. And re-anchoring reads the
-            // window's size back, which right after a resize can still be the old
-            // one — so it is asked for as rarely as possible.
+            // the edge anchor absorbs on its own.
             let along = |s: (i32, i32)| if edge.vertical() { s.1 } else { s.0 };
-            if along(was.0) != along(size) {
-                self.surface.place(&self.win, edge, offset, size);
+            if along(was.0) != along(size)
+                && let Some((_, _, mon_rect, _)) = self.active_monitor()
+            {
+                self.surface.place(&self.win, &mon_rect, edge, offset, size);
             }
         }
         input_region(&self.win, &l);
         self.area.queue_draw();
     }
 
-    /// Where the pointer is on the screen, worked back from the window's own
-    /// anchor and margin. Wayland hands out only window-relative positions, and
-    /// deciding which edge a drag ended on needs the absolute one.
-    fn pointer_on_screen(&self, x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
-        let mon = surface::monitor_geometry(&self.win)?;
-        let (mw, mh) = (mon.width() as f64, mon.height() as f64);
-        let (edge, offset) = {
-            let u = self.ui.borrow();
-            (u.edge, u.offset)
-        };
-        let l = draw::layout(&self.rings(), edge, None);
-        let (span, own) = if edge.vertical() {
-            (mh, l.h)
-        } else {
-            (mw, l.w)
-        };
-        let lead = (span * offset - own / 2.0).clamp(0.0, (span - own).max(0.0));
-        let (px, py) = if edge.vertical() {
-            (if edge == Edge::Right { mw - l.w + x } else { x }, lead + y)
-        } else {
-            (
-                lead + x,
-                if edge == Edge::Bottom {
-                    mh - l.h + y
-                } else {
-                    y
-                },
-            )
-        };
-        Some((px, py, mw, mh))
-    }
-
     /// Drag the notch.
-    ///
-    /// The edge is re-decided as the pointer moves, so the notch travels with it
-    /// instead of staying put and teleporting on release. Two things keep that from
-    /// becoming the anchor storm it was before: the choice is sticky (the current
-    /// edge holds unless another is clearly nearer), so it changes only when the
-    /// pointer really crosses into another region; and moving edges re-creates the
-    /// surface, which is what makes the new anchor actually take.
-    ///
-    /// Along the edge it works in deltas — nudge the offset, let the window move,
-    /// and the next event arrives that much closer to the grab point again, because
-    /// Wayland only ever reports pointer positions relative to the window.
     fn drag_to(&self, x: f64, y: f64) {
         let (edge, offset, grab, moved) = {
             let u = self.ui.borrow();
@@ -816,35 +831,53 @@ impl Ctx {
             self.apply();
         }
 
-        let Some((px, py, mw, mh)) = self.pointer_on_screen(x, y) else {
+        let Some((active_idx, _active_name, active_rect, _active_mon)) = self.active_monitor() else {
             return;
         };
-        let near = edge_for(px, py, mw, mh, edge);
-        if near != edge {
+        let mons = self.monitors();
+        let mon_rects: Vec<surface::MonitorRect> = mons.iter().map(|(_, r, _)| *r).collect();
+
+        let rings = self.rings();
+        let l = draw::layout(&rings, edge, None);
+        let size = (l.w as i32, l.h as i32);
+        let (win_gx, win_gy) = surface::window_global_position(&active_rect, edge, offset, size);
+        let global_px = win_gx as f64 + x;
+        let global_py = win_gy as f64 + y;
+
+        let target_idx = surface::monitor_for_point(&mon_rects, global_px, global_py, active_idx);
+        let (target_spec, target_rect, target_gdk_mon) = &mons[target_idx];
+        let target_px = global_px - target_rect.x as f64;
+        let target_py = global_py - target_rect.y as f64;
+        let (target_w, target_h) = (target_rect.width as f64, target_rect.height as f64);
+
+        let near = edge_for(target_px, target_py, target_w, target_h, edge);
+        let target_name = target_spec.identifier(target_idx);
+
+        if target_idx != active_idx || near != edge {
             let mut u = self.ui.borrow_mut();
+            u.monitor_name = target_name;
             u.edge = near;
-            // The grab point was measured along an axis that no longer exists, so
-            // the offset is read straight off the pointer and the grab restarts.
-            u.offset = (if near.vertical() { py / mh } else { px / mw }).clamp(0.0, 1.0);
+            // The grab point was measured along an axis or monitor that no longer applies,
+            // so offset is read straight off pointer position and grab restarts.
+            u.offset = (if near.vertical() { target_py / target_h } else { target_px / target_w }).clamp(0.0, 1.0);
             u.shown = ((0, 0), None);
             if let Some(d) = u.drag.as_mut() {
                 d.grab = (x, y);
             }
-            let e = u.edge;
+            let (e, o) = (u.edge, u.offset);
             drop(u);
+            self.surface.set_monitor(&self.win, target_gdk_mon);
             self.surface.set_edge(&self.win, e);
+            self.surface.place(&self.win, target_rect, e, o, size);
             self.apply();
             self.area.queue_draw();
             return;
         }
 
-        let Some(mon) = surface::monitor_geometry(&self.win) else {
-            return;
-        };
         let (span, along, grab_along) = if edge.vertical() {
-            (mon.height() as f64, y, grab.1)
+            (active_rect.height as f64, y, grab.1)
         } else {
-            (mon.width() as f64, x, grab.0)
+            (active_rect.width as f64, x, grab.0)
         };
 
         let mut u = self.ui.borrow_mut();
@@ -852,7 +885,7 @@ impl Ctx {
         let (e, o) = (u.edge, u.offset);
         let size = u.shown.0;
         drop(u);
-        self.surface.place(&self.win, e, o, size);
+        self.surface.place(&self.win, &active_rect, e, o, size);
         self.area.queue_draw();
     }
 }
@@ -866,7 +899,7 @@ impl Ctx {
 /// be clearly nearer, not merely nearer, before the notch moves.
 const STICK: f64 = 0.7;
 
-fn edge_for(px: f64, py: f64, mw: f64, mh: f64, current: Edge) -> Edge {
+pub fn edge_for(px: f64, py: f64, mw: f64, mh: f64, current: Edge) -> Edge {
     // Distances are in halves of the screen, not pixels. On a 16:9 display the
     // exact centre is 540px from the top and 960px from the side, so raw pixels
     // call the middle of the screen "near the top" and the notch jumps there while

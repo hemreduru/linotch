@@ -61,12 +61,15 @@ pub trait Surface {
     fn name(&self) -> &'static str;
 
     /// Before the window is realized. Layer-shell setup must happen here.
-    fn prepare(&self, _w: &gtk::ApplicationWindow, _edge: Edge, _offset: f64) {}
+    fn prepare(&self, _w: &gtk::ApplicationWindow, _mon: Option<&gdk::Monitor>, _edge: Edge, _offset: f64) {}
 
     /// Move to a different edge on a window that is already up — what dragging the
     /// notch across the screen needs. Separate from `prepare` because that one also
     /// does the once-only setup.
     fn set_edge(&self, _w: &gtk::ApplicationWindow, _edge: Edge) {}
+
+    /// Pin the surface to a specific monitor.
+    fn set_monitor(&self, _w: &gtk::ApplicationWindow, _mon: &gdk::Monitor) {}
 
     /// After the window is shown, and on monitor changes. For servers that place by
     /// coordinate.
@@ -75,7 +78,7 @@ pub trait Surface {
     /// resize `GtkWindow::size` still reports the old one — GTK's default 200x200 on
     /// the first call — and placing against that puts the notch a hundred pixels
     /// short of the bezel.
-    fn place(&self, _w: &gtk::ApplicationWindow, _edge: Edge, _offset: f64, _size: (i32, i32)) {}
+    fn place(&self, _w: &gtk::ApplicationWindow, _mon: &MonitorRect, _edge: Edge, _offset: f64, _size: (i32, i32)) {}
 }
 
 // ---------------------------------------------------------------- layer shell
@@ -88,6 +91,11 @@ pub struct LayerShell;
 impl Surface for LayerShell {
     fn name(&self) -> &'static str {
         "wlr-layer-shell"
+    }
+
+    fn set_monitor(&self, w: &gtk::ApplicationWindow, mon: &gdk::Monitor) {
+        use gtk_layer_shell::LayerShell as _;
+        w.set_monitor(mon);
     }
 
     /// Re-anchoring a surface that is already mapped is not reliably picked up —
@@ -123,7 +131,7 @@ impl Surface for LayerShell {
         }
     }
 
-    fn prepare(&self, w: &gtk::ApplicationWindow, edge: Edge, offset: f64) {
+    fn prepare(&self, w: &gtk::ApplicationWindow, mon: Option<&gdk::Monitor>, edge: Edge, offset: f64) {
         use gtk_layer_shell::{KeyboardMode, Layer, LayerShell as _};
         w.init_layer_shell();
         w.set_namespace("linotch");
@@ -134,6 +142,9 @@ impl Surface for LayerShell {
         // 0 = float over the desktop without reserving a strut. Reserving one would
         // shrink every maximised window by the notch's width, which is not the deal.
         w.set_exclusive_zone(0);
+        if let Some(m) = mon {
+            w.set_monitor(m);
+        }
         self.set_edge(w, edge);
         let _ = offset; // applied in place(), once the window's own size is known
     }
@@ -141,19 +152,15 @@ impl Surface for LayerShell {
     /// layer-shell has no coordinates, so `offset` becomes a margin — and a margin
     /// positions the window's *leading edge*, not its centre. Subtracting half the
     /// window keeps 0.5 meaning centred, which is what it looks like it means.
-    fn place(&self, w: &gtk::ApplicationWindow, edge: Edge, offset: f64, size: (i32, i32)) {
+    fn place(&self, w: &gtk::ApplicationWindow, mon: &MonitorRect, edge: Edge, offset: f64, size: (i32, i32)) {
         use gtk_layer_shell::LayerShell as _;
-        let Some(mon) = monitor_geometry(w) else {
-            return;
-        };
-        let (ww, wh) = size;
         let (span, own) = if edge.vertical() {
-            (mon.height(), wh)
+            (mon.height, size.1)
         } else {
-            (mon.width(), ww)
+            (mon.width, size.0)
         };
-        let m = (span as f64 * offset.clamp(0.0, 1.0)) as i32 - own / 2;
-        w.set_layer_shell_margin(leading(edge), m.clamp(0, (span - own).max(0)));
+        let m = offset_to_margin(span, own, offset);
+        w.set_layer_shell_margin(leading(edge), m);
     }
 }
 
@@ -177,7 +184,7 @@ impl Surface for X11Dock {
         "x11-dock"
     }
 
-    fn prepare(&self, w: &gtk::ApplicationWindow, _edge: Edge, _offset: f64) {
+    fn prepare(&self, w: &gtk::ApplicationWindow, _mon: Option<&gdk::Monitor>, _edge: Edge, _offset: f64) {
         w.set_type_hint(gdk::WindowTypeHint::Dock);
         w.set_keep_above(true);
         w.set_skip_taskbar_hint(true);
@@ -186,22 +193,8 @@ impl Surface for X11Dock {
         w.stick(); // present on every virtual desktop
     }
 
-    fn place(&self, w: &gtk::ApplicationWindow, edge: Edge, offset: f64, size: (i32, i32)) {
-        let Some(g) = monitor_geometry(w) else { return };
-        let (ww, wh) = size;
-        let off = offset.clamp(0.0, 1.0);
-        let (x, y) = match edge {
-            Edge::Left => (g.x(), g.y() + ((g.height() - wh) as f64 * off) as i32),
-            Edge::Right => (
-                g.x() + g.width() - ww,
-                g.y() + ((g.height() - wh) as f64 * off) as i32,
-            ),
-            Edge::Top => (g.x() + ((g.width() - ww) as f64 * off) as i32, g.y()),
-            Edge::Bottom => (
-                g.x() + ((g.width() - ww) as f64 * off) as i32,
-                g.y() + g.height() - wh,
-            ),
-        };
+    fn place(&self, w: &gtk::ApplicationWindow, mon: &MonitorRect, edge: Edge, offset: f64, size: (i32, i32)) {
+        let (x, y) = window_global_position(mon, edge, offset, size);
         w.move_(x, y);
         // Re-asserted after the window is realized: set before that, there is no X
         // window to hang the hints on yet.
@@ -223,7 +216,7 @@ impl Surface for Floating {
         "floating (no layer-shell)"
     }
 
-    fn prepare(&self, w: &gtk::ApplicationWindow, _edge: Edge, _offset: f64) {
+    fn prepare(&self, w: &gtk::ApplicationWindow, _mon: Option<&gdk::Monitor>, _edge: Edge, _offset: f64) {
         w.set_decorated(false);
         w.set_keep_above(true); // honoured on X11, ignored by Mutter on Wayland
         w.set_skip_taskbar_hint(true);
@@ -231,18 +224,6 @@ impl Surface for Floating {
 }
 
 // ------------------------------------------------------------------ detect
-
-/// The monitor the notch is on. Dragging needs it to turn a pointer position into
-/// a fraction along an edge, so it is public.
-pub fn monitor_geometry(w: &gtk::ApplicationWindow) -> Option<gdk::Rectangle> {
-    let display = w.display();
-    let mon = w
-        .window()
-        .and_then(|gw| display.monitor_at_window(&gw))
-        .or_else(|| display.primary_monitor())
-        .or_else(|| display.monitor(0))?;
-    Some(mon.geometry())
-}
 
 /// True when the session is Wayland — GDK knows, and asking it is more reliable
 /// than `WAYLAND_DISPLAY`, which survives into an XWayland child.
@@ -271,3 +252,310 @@ pub fn detect() -> Box<dyn Surface> {
         Box::new(Floating)
     }
 }
+
+pub fn monitor_connector(screen: &gdk::Screen, idx: i32) -> Option<String> {
+    use glib::translate::{FromGlibPtrFull, ToGlibPtr};
+    unsafe {
+        let ptr = gdk::ffi::gdk_screen_get_monitor_plug_name(
+            screen.to_glib_none().0,
+            idx,
+        );
+        if ptr.is_null() {
+            None
+        } else {
+            let s: glib::GString = FromGlibPtrFull::from_glib_full(ptr);
+            Some(s.to_string())
+        }
+    }
+}
+
+pub fn enumerate_monitors(
+    display: &gdk::Display,
+    screen: Option<&gdk::Screen>,
+) -> Vec<(MonitorSpec, MonitorRect, gdk::Monitor)> {
+    let n = display.n_monitors();
+    let mut list = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        if let Some(mon) = display.monitor(i) {
+            let rect = mon.geometry();
+            let m_rect = MonitorRect::new(rect.x(), rect.y(), rect.width(), rect.height());
+            let plug = screen.and_then(|s| monitor_connector(s, i));
+            let model = mon.model().map(|s| s.to_string());
+            let is_primary = mon.is_primary();
+            let spec = MonitorSpec {
+                connector: plug,
+                model,
+                is_primary,
+            };
+            list.push((spec, m_rect, mon));
+        }
+    }
+    list
+}
+
+// ---------------------------------------------------------------- multi-monitor pure math
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MonitorRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl MonitorRect {
+    pub fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
+        Self { x, y, width, height }
+    }
+
+    pub fn contains(&self, px: f64, py: f64) -> bool {
+        px >= self.x as f64
+            && px < (self.x + self.width) as f64
+            && py >= self.y as f64
+            && py < (self.y + self.height) as f64
+    }
+
+    pub fn distance_sq(&self, px: f64, py: f64) -> f64 {
+        let cx = px.clamp(self.x as f64, (self.x + self.width) as f64);
+        let cy = py.clamp(self.y as f64, (self.y + self.height) as f64);
+        (px - cx).powi(2) + (py - cy).powi(2)
+    }
+}
+
+pub fn offset_to_margin(span: i32, own: i32, offset: f64) -> i32 {
+    let off = offset.clamp(0.0, 1.0);
+    let m = (span as f64 * off).round() as i32 - own / 2;
+    m.clamp(0, (span - own).max(0))
+}
+
+pub fn window_local_position(mon: &MonitorRect, edge: Edge, offset: f64, size: (i32, i32)) -> (i32, i32) {
+    let (ww, wh) = size;
+    let (span, own) = if edge.vertical() {
+        (mon.height, wh)
+    } else {
+        (mon.width, ww)
+    };
+    let margin = offset_to_margin(span, own, offset);
+    match edge {
+        Edge::Left => (0, margin),
+        Edge::Right => (mon.width - ww, margin),
+        Edge::Top => (margin, 0),
+        Edge::Bottom => (margin, mon.height - wh),
+    }
+}
+
+pub fn window_global_position(mon: &MonitorRect, edge: Edge, offset: f64, size: (i32, i32)) -> (i32, i32) {
+    let (lx, ly) = window_local_position(mon, edge, offset, size);
+    (mon.x + lx, mon.y + ly)
+}
+
+pub fn monitor_for_point(monitors: &[MonitorRect], gx: f64, gy: f64, current_idx: usize) -> usize {
+    if monitors.is_empty() {
+        return 0;
+    }
+    // 1. Direct hit
+    for (i, m) in monitors.iter().enumerate() {
+        if m.contains(gx, gy) {
+            return i;
+        }
+    }
+    // 2. Nearest monitor, with bias to current
+    monitors
+        .iter()
+        .enumerate()
+        .min_by(|(idx_a, a), (idx_b, b)| {
+            let mut da = a.distance_sq(gx, gy);
+            let mut db = b.distance_sq(gx, gy);
+            if *idx_a == current_idx {
+                da *= 0.8;
+            }
+            if *idx_b == current_idx {
+                db *= 0.8;
+            }
+            da.total_cmp(&db)
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MonitorSpec {
+    pub connector: Option<String>,
+    pub model: Option<String>,
+    pub is_primary: bool,
+}
+
+impl MonitorSpec {
+    pub fn matches(&self, query: &str) -> bool {
+        let q = query.trim();
+        if q.is_empty() {
+            return false;
+        }
+        if let Some(c) = &self.connector
+            && c.eq_ignore_ascii_case(q)
+        {
+            return true;
+        }
+        if let Some(m) = &self.model
+            && m.eq_ignore_ascii_case(q)
+        {
+            return true;
+        }
+        false
+    }
+
+    pub fn identifier(&self, index: usize) -> String {
+        if let Some(c) = &self.connector
+            && !c.is_empty() && c != "Unknown"
+        {
+            return c.clone();
+        }
+        if let Some(m) = &self.model
+            && !m.is_empty() && m != "Unknown"
+        {
+            return m.clone();
+        }
+        self.connector
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("monitor-{}", index))
+    }
+}
+
+pub fn select_monitor(monitors: &[MonitorSpec], saved: Option<&str>) -> usize {
+    if monitors.is_empty() {
+        return 0;
+    }
+    if let Some(name) = saved
+        && let Some(idx) = monitors.iter().position(|m| m.matches(name))
+    {
+        return idx;
+    }
+    if let Some(idx) = monitors.iter().position(|m| m.is_primary) {
+        return idx;
+    }
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::edge_for;
+
+    #[test]
+    fn offset_margin_centers_on_different_spans() {
+        // 1920 display, 200px notch, offset 0.5 (center) -> margin should be (1920 * 0.5) - (200 / 2) = 860
+        assert_eq!(offset_to_margin(1920, 200, 0.5), 860);
+        // 1280 display, 200px notch, offset 0.5 (center) -> margin should be (1280 * 0.5) - (200 / 2) = 540
+        assert_eq!(offset_to_margin(1280, 200, 0.5), 540);
+        // offset 0.0 -> lead at 0
+        assert_eq!(offset_to_margin(1920, 200, 0.0), 0);
+        // offset 1.0 -> right against edge (1920 - 200 = 1720)
+        assert_eq!(offset_to_margin(1920, 200, 1.0), 1720);
+        // Clamping out-of-bounds offsets
+        assert_eq!(offset_to_margin(1920, 200, -0.5), 0);
+        assert_eq!(offset_to_margin(1920, 200, 1.5), 1720);
+        // Window larger than span clamps safely to 0 without underflow
+        assert_eq!(offset_to_margin(100, 200, 0.5), 0);
+    }
+
+    #[test]
+    fn monitor_selection_by_saved_name_and_fallback() {
+        let specs = vec![
+            MonitorSpec {
+                connector: Some("HEADLESS-1".into()),
+                model: Some("Virtual Display".into()),
+                is_primary: false,
+            },
+            MonitorSpec {
+                connector: Some("HEADLESS-2".into()),
+                model: Some("Virtual Display".into()),
+                is_primary: false,
+            },
+        ];
+
+        // Matches connector name
+        assert_eq!(select_monitor(&specs, Some("HEADLESS-2")), 1);
+        assert_eq!(select_monitor(&specs, Some("HEADLESS-1")), 0);
+        assert_eq!(select_monitor(&specs, Some("headless-2")), 1); // case-insensitive
+
+        // Falls back to index 0 when no primary
+        assert_eq!(select_monitor(&specs, Some("NONEXISTENT")), 0);
+        assert_eq!(select_monitor(&specs, None), 0);
+
+        // Primary fallback when saved is missing or disconnected
+        let specs_with_primary = vec![
+            MonitorSpec {
+                connector: Some("eDP-1".into()),
+                model: Some("Built-in Screen".into()),
+                is_primary: false,
+            },
+            MonitorSpec {
+                connector: Some("DP-1".into()),
+                model: Some("DELL U2720Q".into()),
+                is_primary: true,
+            },
+        ];
+        // Saved name matches model
+        assert_eq!(select_monitor(&specs_with_primary, Some("DELL U2720Q")), 1);
+        // Missing saved name falls back to primary
+        assert_eq!(select_monitor(&specs_with_primary, None), 1);
+        // Disconnected saved monitor falls back to primary
+        assert_eq!(select_monitor(&specs_with_primary, Some("HDMI-1")), 1);
+    }
+
+    #[test]
+    fn multi_monitor_origins_and_drag_selection() {
+        // Output 1: 1920x1080 at (0, 0)
+        let m1 = MonitorRect::new(0, 0, 1920, 1080);
+        // Output 2: 1280x1024 at (1920, 0)
+        let m2 = MonitorRect::new(1920, 0, 1280, 1024);
+        let monitors = [m1, m2];
+
+        // Notch placed on m2 at Top, offset 0.5, size 200x40
+        let (lx, ly) = window_local_position(&m2, Edge::Top, 0.5, (200, 40));
+        assert_eq!(lx, 540); // 1280/2 - 100
+        assert_eq!(ly, 0);
+
+        let (gx, gy) = window_global_position(&m2, Edge::Top, 0.5, (200, 40));
+        assert_eq!(gx, 1920 + 540); // 2460
+        assert_eq!(gy, 0);
+
+        // Pointer inside notch at (100, 20): global coord is (2560, 20)
+        let (ptr_gx, ptr_gy) = (gx as f64 + 100.0, gy as f64 + 20.0);
+        assert_eq!(monitor_for_point(&monitors, ptr_gx, ptr_gy, 1), 1);
+
+        // Dragged to the left onto m1: global coord (1500, 20)
+        let target_idx = monitor_for_point(&monitors, 1500.0, 20.0, 1);
+        assert_eq!(target_idx, 0);
+
+        // Coordinates local to m1
+        let target_lx = 1500.0 - m1.x as f64;
+        let target_ly = 20.0 - m1.y as f64;
+        assert_eq!(target_lx, 1500.0);
+        assert_eq!(target_ly, 20.0);
+
+        // edge_for on m1 (1920x1080)
+        assert_eq!(
+            edge_for(target_lx, target_ly, m1.width as f64, m1.height as f64, Edge::Top),
+            Edge::Top
+        );
+
+        // Dragged near right edge of m1 (1900, 500)
+        assert_eq!(
+            edge_for(1900.0, 500.0, m1.width as f64, m1.height as f64, Edge::Top),
+            Edge::Right
+        );
+
+        // Dragged into m2 near its left edge (1930 in global -> 10 on m2)
+        let m2_idx = monitor_for_point(&monitors, 1930.0, 500.0, 0);
+        assert_eq!(m2_idx, 1);
+        let m2_lx = 1930.0 - m2.x as f64; // 10.0
+        assert_eq!(
+            edge_for(m2_lx, 500.0, m2.width as f64, m2.height as f64, Edge::Right),
+            Edge::Left
+        );
+    }
+}
+
