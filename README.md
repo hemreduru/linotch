@@ -119,6 +119,7 @@ linotch --help
 
 | Variable | Default | |
 |---|---|---|
+| `LINOTCH_MONITOR` | auto | connector or model name (e.g. `DP-1`, `HEADLESS-2`) |
 | `LINOTCH_EDGE` | `right` | `right`, `left`, `top`, `bottom` |
 | `LINOTCH_OFFSET` | `0.5` | position along that edge, `0.0`–`1.0` |
 | `LINOTCH_OPACITY` | `1.0` | panel opacity, `0.35`–`1.0` |
@@ -158,8 +159,7 @@ Yes — see the table above. It restarts itself under XWayland automatically, be
 Mutter supports no protocol that would let a client place itself on Wayland.
 
 **Does it work with multiple monitors?**
-It attaches to the monitor the compositor puts it on and follows that monitor's
-geometry. Drag it to move it.
+Yes. linotch pins to a specific monitor (saved in config by connector or model name, configurable via `LINOTCH_MONITOR`). Dragging the notch across monitor boundaries moves it to that monitor. If a monitor is unplugged or disabled, it falls back gracefully to the primary monitor.
 
 **How often does it poll?**
 Every three minutes, and it honours `Retry-After` on a rate limit. A limit window

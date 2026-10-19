@@ -652,15 +652,27 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, saved_mon: Optio
         }
     });
 
+    let ctx = Ctx::new(&win, &area, &surface, &shared, &ui);
     if let Some(screen) = screen {
-        let ctx = Ctx::new(&win, &area, &surface, &shared, &ui);
+        let c = ctx.clone();
         screen.connect_monitors_changed(move |_| {
-            ctx.on_monitors_changed();
+            c.on_monitors_changed();
+        });
+    }
+    {
+        let c = ctx.clone();
+        display.connect_monitor_added(move |_, _| {
+            c.on_monitors_changed();
+        });
+    }
+    {
+        let c = ctx.clone();
+        display.connect_monitor_removed(move |_, _| {
+            c.on_monitors_changed();
         });
     }
 
     win.show_all();
-    let ctx = Ctx::new(&win, &area, &surface, &shared, &ui);
     ctx.apply();
 
     // Slow tick: the ring count and the media progress arc. The spring runs on its
@@ -734,11 +746,15 @@ impl Ctx {
             let (edge, offset, size) = {
                 let mut u = self.ui.borrow_mut();
                 u.monitor_name = new_name;
-                (u.edge, u.offset, u.shown.0)
+                let size = u.shown.0;
+                u.shown = ((0, 0), None);
+                (u.edge, u.offset, size)
             };
+            self.win.hide();
             self.surface.set_monitor(&self.win, &gdk_mon);
             self.surface.set_edge(&self.win, edge);
             self.surface.place(&self.win, &mon_rect, edge, offset, size);
+            self.win.show();
             self.apply();
             self.area.queue_draw();
         }
