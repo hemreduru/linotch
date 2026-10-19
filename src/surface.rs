@@ -61,7 +61,14 @@ pub trait Surface {
     fn name(&self) -> &'static str;
 
     /// Before the window is realized. Layer-shell setup must happen here.
-    fn prepare(&self, _w: &gtk::ApplicationWindow, _mon: Option<&gdk::Monitor>, _edge: Edge, _offset: f64) {}
+    fn prepare(
+        &self,
+        _w: &gtk::ApplicationWindow,
+        _mon: Option<&gdk::Monitor>,
+        _edge: Edge,
+        _offset: f64,
+    ) {
+    }
 
     /// Move to a different edge on a window that is already up — what dragging the
     /// notch across the screen needs. Separate from `prepare` because that one also
@@ -78,7 +85,15 @@ pub trait Surface {
     /// resize `GtkWindow::size` still reports the old one — GTK's default 200x200 on
     /// the first call — and placing against that puts the notch a hundred pixels
     /// short of the bezel.
-    fn place(&self, _w: &gtk::ApplicationWindow, _mon: &MonitorRect, _edge: Edge, _offset: f64, _size: (i32, i32)) {}
+    fn place(
+        &self,
+        _w: &gtk::ApplicationWindow,
+        _mon: &MonitorRect,
+        _edge: Edge,
+        _offset: f64,
+        _size: (i32, i32),
+    ) {
+    }
 }
 
 // ---------------------------------------------------------------- layer shell
@@ -131,7 +146,13 @@ impl Surface for LayerShell {
         }
     }
 
-    fn prepare(&self, w: &gtk::ApplicationWindow, mon: Option<&gdk::Monitor>, edge: Edge, offset: f64) {
+    fn prepare(
+        &self,
+        w: &gtk::ApplicationWindow,
+        mon: Option<&gdk::Monitor>,
+        edge: Edge,
+        offset: f64,
+    ) {
         use gtk_layer_shell::{KeyboardMode, Layer, LayerShell as _};
         w.init_layer_shell();
         w.set_namespace("linotch");
@@ -152,7 +173,14 @@ impl Surface for LayerShell {
     /// layer-shell has no coordinates, so `offset` becomes a margin — and a margin
     /// positions the window's *leading edge*, not its centre. Subtracting half the
     /// window keeps 0.5 meaning centred, which is what it looks like it means.
-    fn place(&self, w: &gtk::ApplicationWindow, mon: &MonitorRect, edge: Edge, offset: f64, size: (i32, i32)) {
+    fn place(
+        &self,
+        w: &gtk::ApplicationWindow,
+        mon: &MonitorRect,
+        edge: Edge,
+        offset: f64,
+        size: (i32, i32),
+    ) {
         use gtk_layer_shell::LayerShell as _;
         let (span, own) = if edge.vertical() {
             (mon.height, size.1)
@@ -184,7 +212,13 @@ impl Surface for X11Dock {
         "x11-dock"
     }
 
-    fn prepare(&self, w: &gtk::ApplicationWindow, _mon: Option<&gdk::Monitor>, _edge: Edge, _offset: f64) {
+    fn prepare(
+        &self,
+        w: &gtk::ApplicationWindow,
+        _mon: Option<&gdk::Monitor>,
+        _edge: Edge,
+        _offset: f64,
+    ) {
         w.set_type_hint(gdk::WindowTypeHint::Dock);
         w.set_keep_above(true);
         w.set_skip_taskbar_hint(true);
@@ -193,7 +227,14 @@ impl Surface for X11Dock {
         w.stick(); // present on every virtual desktop
     }
 
-    fn place(&self, w: &gtk::ApplicationWindow, mon: &MonitorRect, edge: Edge, offset: f64, size: (i32, i32)) {
+    fn place(
+        &self,
+        w: &gtk::ApplicationWindow,
+        mon: &MonitorRect,
+        edge: Edge,
+        offset: f64,
+        size: (i32, i32),
+    ) {
         let (x, y) = window_global_position(mon, edge, offset, size);
         w.move_(x, y);
         // Re-asserted after the window is realized: set before that, there is no X
@@ -216,7 +257,13 @@ impl Surface for Floating {
         "floating (no layer-shell)"
     }
 
-    fn prepare(&self, w: &gtk::ApplicationWindow, _mon: Option<&gdk::Monitor>, _edge: Edge, _offset: f64) {
+    fn prepare(
+        &self,
+        w: &gtk::ApplicationWindow,
+        _mon: Option<&gdk::Monitor>,
+        _edge: Edge,
+        _offset: f64,
+    ) {
         w.set_decorated(false);
         w.set_keep_above(true); // honoured on X11, ignored by Mutter on Wayland
         w.set_skip_taskbar_hint(true);
@@ -256,10 +303,7 @@ pub fn detect() -> Box<dyn Surface> {
 pub fn monitor_connector(screen: &gdk::Screen, idx: i32) -> Option<String> {
     use glib::translate::{FromGlibPtrFull, ToGlibPtr};
     unsafe {
-        let ptr = gdk::ffi::gdk_screen_get_monitor_plug_name(
-            screen.to_glib_none().0,
-            idx,
-        );
+        let ptr = gdk::ffi::gdk_screen_get_monitor_plug_name(screen.to_glib_none().0, idx);
         if ptr.is_null() {
             None
         } else {
@@ -305,7 +349,12 @@ pub struct MonitorRect {
 
 impl MonitorRect {
     pub fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn contains(&self, px: f64, py: f64) -> bool {
@@ -328,7 +377,12 @@ pub fn offset_to_margin(span: i32, own: i32, offset: f64) -> i32 {
     m.clamp(0, (span - own).max(0))
 }
 
-pub fn window_local_position(mon: &MonitorRect, edge: Edge, offset: f64, size: (i32, i32)) -> (i32, i32) {
+pub fn window_local_position(
+    mon: &MonitorRect,
+    edge: Edge,
+    offset: f64,
+    size: (i32, i32),
+) -> (i32, i32) {
     let (ww, wh) = size;
     let (span, own) = if edge.vertical() {
         (mon.height, wh)
@@ -344,7 +398,12 @@ pub fn window_local_position(mon: &MonitorRect, edge: Edge, offset: f64, size: (
     }
 }
 
-pub fn window_global_position(mon: &MonitorRect, edge: Edge, offset: f64, size: (i32, i32)) -> (i32, i32) {
+pub fn window_global_position(
+    mon: &MonitorRect,
+    edge: Edge,
+    offset: f64,
+    size: (i32, i32),
+) -> (i32, i32) {
     let (lx, ly) = window_local_position(mon, edge, offset, size);
     (mon.x + lx, mon.y + ly)
 }
@@ -406,12 +465,14 @@ impl MonitorSpec {
 
     pub fn identifier(&self, index: usize) -> String {
         if let Some(c) = &self.connector
-            && !c.is_empty() && c != "Unknown"
+            && !c.is_empty()
+            && c != "Unknown"
         {
             return c.clone();
         }
         if let Some(m) = &self.model
-            && !m.is_empty() && m != "Unknown"
+            && !m.is_empty()
+            && m != "Unknown"
         {
             return m.clone();
         }
@@ -538,7 +599,13 @@ mod tests {
 
         // edge_for on m1 (1920x1080)
         assert_eq!(
-            edge_for(target_lx, target_ly, m1.width as f64, m1.height as f64, Edge::Top),
+            edge_for(
+                target_lx,
+                target_ly,
+                m1.width as f64,
+                m1.height as f64,
+                Edge::Top
+            ),
             Edge::Top
         );
 
@@ -558,4 +625,3 @@ mod tests {
         );
     }
 }
-

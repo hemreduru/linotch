@@ -109,7 +109,9 @@ fn main() {
     let app = gtk::Application::builder()
         .application_id("dev.linotch.Linotch")
         .build();
-    app.connect_activate(move |app| build_ui(app, Arc::clone(&shared), saved_mon.clone(), edge, offset));
+    app.connect_activate(move |app| {
+        build_ui(app, Arc::clone(&shared), saved_mon.clone(), edge, offset)
+    });
     // GTK must not see our own flags; they were handled above.
     app.run_with_args::<&str>(&[]);
 }
@@ -448,7 +450,13 @@ impl Ui {
     }
 }
 
-fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, saved_mon: Option<String>, edge: Edge, offset: f64) {
+fn build_ui(
+    app: &gtk::Application,
+    shared: Arc<Mutex<Shared>>,
+    saved_mon: Option<String>,
+    edge: Edge,
+    offset: f64,
+) {
     let surface: Rc<dyn surface::Surface> = surface::detect().into();
     eprintln!("linotch: surface = {}", surface.name());
 
@@ -465,9 +473,17 @@ fn build_ui(app: &gtk::Application, shared: Arc<Mutex<Shared>>, saved_mon: Optio
     let specs: Vec<surface::MonitorSpec> = mons.iter().map(|(s, _, _)| s.clone()).collect();
     let mon_idx = surface::select_monitor(&specs, saved_mon.as_deref());
     let (mon_name, _mon_rect, gdk_mon) = if !mons.is_empty() {
-        (specs[mon_idx].identifier(mon_idx), mons[mon_idx].1, Some(mons[mon_idx].2.clone()))
+        (
+            specs[mon_idx].identifier(mon_idx),
+            mons[mon_idx].1,
+            Some(mons[mon_idx].2.clone()),
+        )
     } else {
-        ("default".into(), surface::MonitorRect::new(0, 0, 1920, 1080), None)
+        (
+            "default".into(),
+            surface::MonitorRect::new(0, 0, 1920, 1080),
+            None,
+        )
     };
 
     surface.prepare(&win, gdk_mon.as_ref(), edge, offset);
@@ -847,7 +863,8 @@ impl Ctx {
             self.apply();
         }
 
-        let Some((active_idx, _active_name, active_rect, _active_mon)) = self.active_monitor() else {
+        let Some((active_idx, _active_name, active_rect, _active_mon)) = self.active_monitor()
+        else {
             return;
         };
         let mons = self.monitors();
@@ -875,7 +892,12 @@ impl Ctx {
             u.edge = near;
             // The grab point was measured along an axis or monitor that no longer applies,
             // so offset is read straight off pointer position and grab restarts.
-            u.offset = (if near.vertical() { target_py / target_h } else { target_px / target_w }).clamp(0.0, 1.0);
+            u.offset = (if near.vertical() {
+                target_py / target_h
+            } else {
+                target_px / target_w
+            })
+            .clamp(0.0, 1.0);
             u.shown = ((0, 0), None);
             if let Some(d) = u.drag.as_mut() {
                 d.grab = (x, y);
