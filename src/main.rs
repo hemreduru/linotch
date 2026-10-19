@@ -390,9 +390,17 @@ struct Drag {
 }
 
 struct Ui {
-    monitor_name: String,
+    /// The user's preferred monitor (from config/env or user drag).
+    /// Kept separate from `current_monitor` so fallback placement does not lose preference.
+    preferred_monitor: Option<String>,
+    /// The output connector or model name the notch is currently placed on.
+    current_monitor: String,
+    /// Geometry of the current monitor, used to deduplicate monitor-change events.
+    current_rect: Option<surface::MonitorRect>,
     edge: Edge,
     offset: f64,
+    /// Set when Quit is selected from the menu so delete-event does not block application exit.
+    quitting: bool,
     /// The panel being drawn. Outlives `target` going to zero, so the close
     /// animation has something to draw.
     panel: Option<draw::Open>,
@@ -471,19 +479,19 @@ fn build_ui(
     let display = win.display();
     let mons = surface::enumerate_monitors(&display, screen.as_ref());
     let specs: Vec<surface::MonitorSpec> = mons.iter().map(|(s, _, _)| s.clone()).collect();
-    let mon_idx = surface::select_monitor(&specs, saved_mon.as_deref());
-    let (mon_name, _mon_rect, gdk_mon) = if !mons.is_empty() {
+    let mon_idx = surface::resolve_monitor(&specs, saved_mon.as_deref());
+    let (mon_name, gdk_mon) = if !mons.is_empty() {
         (
             specs[mon_idx].identifier(mon_idx),
-            mons[mon_idx].1,
             Some(mons[mon_idx].2.clone()),
         )
     } else {
-        (
-            "default".into(),
-            surface::MonitorRect::new(0, 0, 1920, 1080),
-            None,
-        )
+        ("default".into(), None)
+    };
+    let initial_rect = if !mons.is_empty() {
+        Some(mons[mon_idx].1)
+    } else {
+        None
     };
 
     surface.prepare(&win, gdk_mon.as_ref(), edge, offset);
@@ -498,9 +506,12 @@ fn build_ui(
     win.add(&area);
 
     let ui = Rc::new(RefCell::new(Ui {
-        monitor_name: mon_name,
+        preferred_monitor: saved_mon,
+        current_monitor: mon_name,
+        current_rect: initial_rect,
         edge,
         offset,
+        quitting: false,
         panel: None,
         target: 0.0,
         t: 0.0,
@@ -618,7 +629,10 @@ fn build_ui(
                 ctx.animate();
                 match pick {
                     Some(0) => REFRESH.store(true, std::sync::atomic::Ordering::Relaxed),
-                    Some(1) => ctx.win.close(),
+                    Some(1) => {
+                        ctx.ui.borrow_mut().quitting = true;
+                        ctx.win.close();
+                    }
                     _ => {}
                 }
                 return glib::Propagation::Stop;
@@ -646,7 +660,7 @@ fn build_ui(
             };
             if drag.moved {
                 let u = ctx.ui.borrow();
-                config::Config::save(Some(&u.monitor_name), u.edge, u.offset);
+                config::Config::save(u.preferred_monitor.as_deref(), u.edge, u.offset);
                 return glib::Propagation::Stop;
             }
             // Not a drag, so it was a click.
@@ -668,22 +682,28 @@ fn build_ui(
         }
     });
 
+    // When the output the surface is on is disabled or disconnected, wlroots sends
+    // zwlr_layer_surface_v1.closed. gtk-layer-shell responds to .closed by calling
+    // gtk_window_close(), which emits delete-event on GtkWindow.
+    // If not intercepted, GtkWindow is destroyed, and with 0 windows left GtkApplication
+    // exits with code 0.
+    // Intercepting delete-event with Propagation::Stop keeps the window alive and triggers
+    // re-mapping onto the remaining active output. Menu Quit is tracked via `quitting` so it still exits.
+    win.connect_delete_event({
+        let ctx = Ctx::new(&win, &area, &surface, &shared, &ui);
+        move |_, _| {
+            if ctx.ui.borrow().quitting {
+                return glib::Propagation::Proceed;
+            }
+            ctx.on_monitors_changed();
+            glib::Propagation::Stop
+        }
+    });
+
     let ctx = Ctx::new(&win, &area, &surface, &shared, &ui);
     if let Some(screen) = screen {
         let c = ctx.clone();
         screen.connect_monitors_changed(move |_| {
-            c.on_monitors_changed();
-        });
-    }
-    {
-        let c = ctx.clone();
-        display.connect_monitor_added(move |_, _| {
-            c.on_monitors_changed();
-        });
-    }
-    {
-        let c = ctx.clone();
-        display.connect_monitor_removed(move |_, _| {
             c.on_monitors_changed();
         });
     }
@@ -747,11 +767,11 @@ impl Ctx {
             return None;
         }
         let specs: Vec<surface::MonitorSpec> = mons.iter().map(|(s, _, _)| s.clone()).collect();
-        let saved = {
+        let preferred = {
             let u = self.ui.borrow();
-            u.monitor_name.clone()
+            u.preferred_monitor.clone()
         };
-        let idx = surface::select_monitor(&specs, Some(&saved));
+        let idx = surface::resolve_monitor(&specs, preferred.as_deref());
         let name = specs[idx].identifier(idx);
         let (_spec, rect, gdk_mon) = mons[idx].clone();
         Some((idx, name, rect, gdk_mon))
@@ -761,7 +781,14 @@ impl Ctx {
         if let Some((_, new_name, mon_rect, gdk_mon)) = self.active_monitor() {
             let (edge, offset, size) = {
                 let mut u = self.ui.borrow_mut();
-                u.monitor_name = new_name;
+                if u.current_monitor == new_name
+                    && u.current_rect == Some(mon_rect)
+                    && self.win.is_mapped()
+                {
+                    return;
+                }
+                u.current_monitor = new_name;
+                u.current_rect = Some(mon_rect);
                 let size = u.shown.0;
                 u.shown = ((0, 0), None);
                 (u.edge, u.offset, size)
@@ -825,7 +852,9 @@ impl Ctx {
             self.win.resize(size.0, size.1);
             self.win.show();
             // Only the length along the edge needs re-anchoring; a change in depth
-            // the edge anchor absorbs on its own.
+            // the edge anchor absorbs on its own. And re-anchoring reads the
+            // window's size back, which right after a resize can still be the old
+            // one — so it is asked for as rarely as possible.
             let along = |s: (i32, i32)| if edge.vertical() { s.1 } else { s.0 };
             if along(was.0) != along(size)
                 && let Some((_, _, mon_rect, _)) = self.active_monitor()
@@ -838,6 +867,17 @@ impl Ctx {
     }
 
     /// Drag the notch.
+    ///
+    /// The edge is re-decided as the pointer moves, so the notch travels with it
+    /// instead of staying put and teleporting on release. Two things keep that from
+    /// becoming the anchor storm it was before: the choice is sticky (the current
+    /// edge holds unless another is clearly nearer), so it changes only when the
+    /// pointer really crosses into another region; and moving edges re-creates the
+    /// surface, which is what makes the new anchor actually take.
+    ///
+    /// Along the edge it works in deltas — nudge the offset, let the window move,
+    /// and the next event arrives that much closer to the grab point again, because
+    /// Wayland only ever reports pointer positions relative to the window.
     fn drag_to(&self, x: f64, y: f64) {
         let (edge, offset, grab, moved) = {
             let u = self.ui.borrow();
@@ -888,7 +928,9 @@ impl Ctx {
 
         if target_idx != active_idx || near != edge {
             let mut u = self.ui.borrow_mut();
-            u.monitor_name = target_name;
+            u.current_monitor = target_name.clone();
+            u.preferred_monitor = Some(target_name);
+            u.current_rect = Some(*target_rect);
             u.edge = near;
             // The grab point was measured along an axis or monitor that no longer applies,
             // so offset is read straight off pointer position and grab restarts.
