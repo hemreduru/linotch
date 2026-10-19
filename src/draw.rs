@@ -55,8 +55,7 @@ const CARD_W: f64 = px(600.0);
 const CARD_CORNER: f64 = px(49.5);
 const CARD_PAD: f64 = px(32.0);
 const FILLET_R: f64 = px(36.0); // smooth concave fillet joining rail into panel
-const KAPPA1: f64 = 0.68; // continuous-curvature squircle control point ratio 1
-const KAPPA2: f64 = 0.32; // continuous-curvature squircle control point ratio 2
+const KAPPA: f64 = 0.6; // symmetric squircle control point ratio (~0.6)
 const BAR_H: f64 = px(10.5);
 const HEADER_GAP: f64 = px(17.0); // mark -> title
 const HEADER_TO_BLOCK: f64 = px(21.0);
@@ -409,6 +408,31 @@ fn rgba(cr: &cairo::Context, c: (f64, f64, f64, f64)) {
     cr.set_source_rgba(c.0, c.1, c.2, c.3);
 }
 
+/// Draw an axis-aligned 90-degree continuous-curvature corner curve with symmetric handles (~0.6).
+fn corner(cr: &cairo::Context, from: (f64, f64), to: (f64, f64), initial_horizontal: bool) {
+    let (x0, y0) = from;
+    let (x1, y1) = to;
+    if (x0 - x1).abs() < 1e-6 && (y0 - y1).abs() < 1e-6 {
+        return;
+    }
+    let (cp1, cp2) = if initial_horizontal {
+        ((x0 + (x1 - x0) * KAPPA, y0), (x1, y1 - (y1 - y0) * KAPPA))
+    } else {
+        ((x0, y0 + (y1 - y0) * KAPPA), (x1 - (x1 - x0) * KAPPA, y1))
+    };
+    cr.curve_to(cp1.0, cp1.1, cp2.0, cp2.1, x1, y1);
+}
+
+fn apply_canonical_transform(cr: &cairo::Context, rail: Rect, edge: Edge, thick: f64, length: f64) {
+    cr.translate(rail.x, rail.y);
+    match edge {
+        Edge::Right => {}
+        Edge::Left => cr.transform(cairo::Matrix::new(-1.0, 0.0, 0.0, 1.0, thick, 0.0)),
+        Edge::Top => cr.transform(cairo::Matrix::new(0.0, -1.0, 1.0, 0.0, 0.0, thick)),
+        Edge::Bottom => cr.transform(cairo::Matrix::new(0.0, 1.0, -1.0, 0.0, length, 0.0)),
+    }
+}
+
 /// The notch body: a pill welded to one edge, with *inverse* rounded corners at
 /// each end that flare back out to the bezel, so it reads as part of the edge
 /// rather than a panel floating near it.
@@ -426,62 +450,28 @@ fn notch_path(cr: &cairo::Context, rail: Rect, edge: Edge) {
 
     let wanted = CORNER.min(thick / 2.0).max(0.0);
     let curl = CURL.min(length / 2.0).min(thick - wanted).max(0.0);
-    let corner = wanted.min((length - 2.0 * curl) / 2.0).max(0.0);
+    let corner_r = wanted.min((length - 2.0 * curl) / 2.0).max(0.0);
     let (top, bottom) = (curl, length - curl);
 
     let _ = cr.save();
-    cr.translate(rail.x, rail.y);
-    match edge {
-        Edge::Right => {}
-        Edge::Left => cr.transform(cairo::Matrix::new(-1.0, 0.0, 0.0, 1.0, thick, 0.0)),
-        Edge::Top => cr.transform(cairo::Matrix::new(0.0, -1.0, 1.0, 0.0, 0.0, thick)),
-        Edge::Bottom => cr.transform(cairo::Matrix::new(0.0, 1.0, -1.0, 0.0, length, 0.0)),
-    }
+    apply_canonical_transform(cr, rail, edge, thick, length);
 
     cr.new_path();
     cr.move_to(thick, 0.0);
     if curl > 0.0 {
-        cr.curve_to(
-            thick,
-            curl * KAPPA1,
-            thick - curl * (1.0 - KAPPA2),
-            curl,
-            thick - curl,
-            curl,
-        );
+        corner(cr, (thick, 0.0), (thick - curl, top), false);
     }
-    cr.line_to(corner, top);
-    if corner > 0.0 {
-        cr.curve_to(
-            corner * (1.0 - KAPPA1),
-            top,
-            0.0,
-            top + corner * (1.0 - KAPPA2),
-            0.0,
-            top + corner,
-        );
+    cr.line_to(corner_r, top);
+    if corner_r > 0.0 {
+        corner(cr, (corner_r, top), (0.0, top + corner_r), true);
     }
-    cr.line_to(0.0, bottom - corner);
-    if corner > 0.0 {
-        cr.curve_to(
-            0.0,
-            bottom - corner + corner * KAPPA1,
-            corner * (1.0 - KAPPA2),
-            bottom,
-            corner,
-            bottom,
-        );
+    cr.line_to(0.0, bottom - corner_r);
+    if corner_r > 0.0 {
+        corner(cr, (0.0, bottom - corner_r), (corner_r, bottom), false);
     }
     cr.line_to(thick - curl, bottom);
     if curl > 0.0 {
-        cr.curve_to(
-            thick - curl + curl * (1.0 - KAPPA2),
-            bottom,
-            thick,
-            length - curl * KAPPA1,
-            thick,
-            length,
-        );
+        corner(cr, (thick - curl, bottom), (thick, length), true);
     }
     cr.close_path();
     let _ = cr.restore();
@@ -500,12 +490,7 @@ fn canonical_panel(rect: Rect, rail: Rect, edge: Edge) -> CanonicalPanel {
             v2: rect.x + rect.w,
             depth: rect.h,
         },
-        Edge::Left => CanonicalPanel {
-            v1: rect.y,
-            v2: rect.y + rect.h,
-            depth: rect.w,
-        },
-        Edge::Right => CanonicalPanel {
+        Edge::Left | Edge::Right => CanonicalPanel {
             v1: rect.y,
             v2: rect.y + rect.h,
             depth: rect.w,
@@ -515,6 +500,137 @@ fn canonical_panel(rect: Rect, rail: Rect, edge: Edge) -> CanonicalPanel {
             v2: rail.w - rect.x,
             depth: rect.h,
         },
+    }
+}
+
+/// Geometry parameters for the unified Dynamic Island shape. Shared by `island_path` and `draw_rim_stroke`.
+struct IslandGeom {
+    thick: f64,
+    length: f64,
+    curl: f64,
+    top: f64,
+    corner: f64,
+    bottom: f64,
+    d: f64,
+    v1: f64,
+    v2: f64,
+    rc: f64,
+    rf_left: f64,
+    rf_right: f64,
+}
+
+impl IslandGeom {
+    fn new(rail: Rect, edge: Edge, panel: Rect, t: f64, offset: f64, expand: f64) -> Self {
+        let (thick, length) = if edge.vertical() {
+            (rail.w, rail.h)
+        } else {
+            (rail.h, rail.w)
+        };
+
+        let wanted = CORNER.min(thick / 2.0).max(0.0);
+        let curl = CURL.min(length / 2.0).min(thick - wanted).max(0.0);
+        let corner_r = wanted.min((length - 2.0 * curl) / 2.0).max(0.0);
+        let (top, bottom) = (curl, length - curl);
+
+        let canon = canonical_panel(panel, rail, edge);
+        let t_geom = t.clamp(0.0, 1.05);
+        let base_d = (canon.depth * t_geom).max(0.0);
+
+        // Cap expand so shadow never clips against the window boundary:
+        // 1. In depth: window allocated depth is canon.depth + SHADOW_PAD.
+        let max_expand_d = (canon.depth + SHADOW_PAD - base_d - offset).max(0.0);
+        let expand_d = expand.min(max_expand_d).max(0.0);
+        let d = (base_d + offset + expand_d).max(0.0);
+
+        let v_mid = (canon.v1 + canon.v2) / 2.0;
+        let target_hw = (canon.v2 - canon.v1) / 2.0;
+        let init_hw = (RING_D / 2.0).min(target_hw);
+        let hw_base = init_hw + (target_hw - init_hw) * t.clamp(0.0, 1.0);
+
+        let min_v = top + corner_r;
+        let max_v = bottom - corner_r;
+
+        // 2. Along the edge: cap expand to room remaining before rail ends.
+        let avail_left_room = (v_mid - hw_base - min_v).max(0.0);
+        let avail_right_room = (max_v - (v_mid + hw_base)).max(0.0);
+        let expand_v = expand.min(avail_left_room.min(avail_right_room)).max(0.0);
+
+        let hw = (hw_base + expand_v).max(0.0);
+        let v1 = (v_mid - hw).clamp(min_v, max_v);
+        let v2 = (v_mid + hw).clamp(v1, max_v);
+
+        let rc = (CARD_CORNER + expand_d)
+            .min(d / 2.0)
+            .min((v2 - v1) / 2.0)
+            .max(0.0);
+
+        let avail_left = v1 - min_v;
+        let rf_left = FILLET_R
+            .min(d / 2.0)
+            .min((v2 - v1) / 4.0)
+            .min(avail_left)
+            .max(0.0);
+
+        let avail_right = max_v - v2;
+        let rf_right = FILLET_R
+            .min(d / 2.0)
+            .min((v2 - v1) / 4.0)
+            .min(avail_right)
+            .max(0.0);
+
+        Self {
+            thick,
+            length,
+            curl,
+            top,
+            corner: corner_r,
+            bottom,
+            d,
+            v1,
+            v2,
+            rc,
+            rf_left,
+            rf_right,
+        }
+    }
+
+    /// Traces the open panel perimeter from the start of the left fillet to the end of the right fillet.
+    fn draw_panel_perimeter(&self, cr: &cairo::Context) {
+        if self.rf_left > 0.0 {
+            corner(
+                cr,
+                (0.0, self.v1 - self.rf_left),
+                (-self.rf_left, self.v1),
+                false,
+            );
+        }
+        cr.line_to(-self.d + self.rc, self.v1);
+        if self.rc > 0.0 {
+            corner(
+                cr,
+                (-self.d + self.rc, self.v1),
+                (-self.d, self.v1 + self.rc),
+                true,
+            );
+        }
+        cr.line_to(-self.d, self.v2 - self.rc);
+        if self.rc > 0.0 {
+            corner(
+                cr,
+                (-self.d, self.v2 - self.rc),
+                (-self.d + self.rc, self.v2),
+                false,
+            );
+        }
+        cr.line_to(-self.rf_right, self.v2);
+        if self.rf_right > 0.0 {
+            corner(
+                cr,
+                (-self.rf_right, self.v2),
+                (0.0, self.v2 + self.rf_right),
+                true,
+            );
+        }
     }
 }
 
@@ -531,187 +647,53 @@ fn island_path(
     offset: f64,
     expand: f64,
 ) {
-    let (thick, length) = if edge.vertical() {
-        (rail.w, rail.h)
-    } else {
-        (rail.h, rail.w)
-    };
-
-    let wanted = CORNER.min(thick / 2.0).max(0.0);
-    let curl = CURL.min(length / 2.0).min(thick - wanted).max(0.0);
-    let corner = wanted.min((length - 2.0 * curl) / 2.0).max(0.0);
-    let (top, bottom) = (curl, length - curl);
-
-    let canon = canonical_panel(panel, rail, edge);
-    let t_geom = t.clamp(0.0, 1.05);
-    let base_d = (canon.depth * t_geom).max(0.0);
-
-    if base_d < 0.5 {
+    let geom = IslandGeom::new(rail, edge, panel, t, offset, expand);
+    if geom.d < 0.5 {
         notch_path(cr, rail, edge);
         return;
     }
 
-    let d = (base_d + offset + expand).max(0.0);
-
-    let v_mid = (canon.v1 + canon.v2) / 2.0;
-    let target_hw = (canon.v2 - canon.v1) / 2.0;
-    let init_hw = (RING_D / 2.0).min(target_hw);
-    let hw = (init_hw + (target_hw - init_hw) * t.clamp(0.0, 1.0) + expand).max(0.0);
-
-    let v1 = (v_mid - hw).max(0.0);
-    let v2 = (v_mid + hw).min(length);
-
-    let rc = (CARD_CORNER + expand)
-        .min(d / 2.0)
-        .min((v2 - v1) / 2.0)
-        .max(0.0);
-
-    let avail_left = v1 - (top + corner);
-    let rf_left = if avail_left > 0.0 {
-        FILLET_R
-            .min(d / 2.0)
-            .min((v2 - v1) / 4.0)
-            .min(avail_left)
-            .max(0.0)
-    } else {
-        0.0
-    };
-
-    let avail_right = (bottom - corner) - v2;
-    let rf_right = if avail_right > 0.0 {
-        FILLET_R
-            .min(d / 2.0)
-            .min((v2 - v1) / 4.0)
-            .min(avail_right)
-            .max(0.0)
-    } else {
-        0.0
-    };
-
     let _ = cr.save();
-    cr.translate(rail.x, rail.y);
-    match edge {
-        Edge::Right => {}
-        Edge::Left => cr.transform(cairo::Matrix::new(-1.0, 0.0, 0.0, 1.0, thick, 0.0)),
-        Edge::Top => cr.transform(cairo::Matrix::new(0.0, -1.0, 1.0, 0.0, 0.0, thick)),
-        Edge::Bottom => cr.transform(cairo::Matrix::new(0.0, 1.0, -1.0, 0.0, length, 0.0)),
-    }
+    apply_canonical_transform(cr, rail, edge, geom.thick, geom.length);
 
     cr.new_path();
-    cr.move_to(thick, 0.0);
-    if curl > 0.0 {
-        cr.curve_to(
-            thick,
-            curl * KAPPA1,
-            thick - curl * (1.0 - KAPPA2),
-            curl,
-            thick - curl,
-            curl,
+    cr.move_to(geom.thick, 0.0);
+    if geom.curl > 0.0 {
+        corner(
+            cr,
+            (geom.thick, 0.0),
+            (geom.thick - geom.curl, geom.top),
+            false,
         );
     }
-    if avail_left > 0.0 {
-        cr.line_to(corner, top);
-        if corner > 0.0 {
-            cr.curve_to(
-                corner * (1.0 - KAPPA1),
-                top,
-                0.0,
-                top + corner * (1.0 - KAPPA2),
-                0.0,
-                top + corner,
-            );
-        }
-        cr.line_to(0.0, v1 - rf_left);
-        if rf_left > 0.0 {
-            cr.curve_to(
-                0.0,
-                v1 - rf_left + rf_left * KAPPA1,
-                -rf_left * (1.0 - KAPPA2),
-                v1,
-                -rf_left,
-                v1,
-            );
-        }
-    } else {
-        cr.line_to(0.0, v1);
-    }
-
-    // Panel side 1
-    cr.line_to(-d + rc, v1);
-    // Panel outer corner 1
-    if rc > 0.0 {
-        cr.curve_to(
-            -d + rc * (1.0 - KAPPA1),
-            v1,
-            -d,
-            v1 + rc * (1.0 - KAPPA2),
-            -d,
-            v1 + rc,
+    cr.line_to(geom.corner, geom.top);
+    if geom.corner > 0.0 {
+        corner(
+            cr,
+            (geom.corner, geom.top),
+            (0.0, geom.top + geom.corner),
+            true,
         );
     }
-    // Panel outer edge
-    cr.line_to(-d, v2 - rc);
-    // Panel outer corner 2
-    if rc > 0.0 {
-        cr.curve_to(
-            -d,
-            v2 - rc + rc * KAPPA1,
-            -d + rc * (1.0 - KAPPA2),
-            v2,
-            -d + rc,
-            v2,
+    cr.line_to(0.0, geom.v1 - geom.rf_left);
+    geom.draw_panel_perimeter(cr);
+    cr.line_to(0.0, geom.bottom - geom.corner);
+    if geom.corner > 0.0 {
+        corner(
+            cr,
+            (0.0, geom.bottom - geom.corner),
+            (geom.corner, geom.bottom),
+            false,
         );
     }
-    // Panel side 2 and right flare
-    if avail_right > 0.0 {
-        cr.line_to(-rf_right, v2);
-        if rf_right > 0.0 {
-            cr.curve_to(
-                -rf_right * (1.0 - KAPPA2),
-                v2,
-                0.0,
-                v2 + rf_right - rf_right * KAPPA1,
-                0.0,
-                v2 + rf_right,
-            );
-        }
-        cr.line_to(0.0, bottom - corner);
-        if corner > 0.0 {
-            cr.curve_to(
-                0.0,
-                bottom - corner + corner * KAPPA1,
-                corner * (1.0 - KAPPA2),
-                bottom,
-                corner,
-                bottom,
-            );
-        }
-        cr.line_to(thick - curl, bottom);
-        if curl > 0.0 {
-            cr.curve_to(
-                thick - curl + curl * (1.0 - KAPPA2),
-                bottom,
-                thick,
-                length - curl * KAPPA1,
-                thick,
-                length,
-            );
-        }
-    } else {
-        cr.line_to(0.0, v2);
-        cr.line_to(thick - curl, bottom.max(v2));
-        if curl > 0.0 {
-            cr.curve_to(
-                thick - curl + curl * (1.0 - KAPPA2),
-                bottom.max(v2),
-                thick,
-                length - curl * KAPPA1,
-                thick,
-                length,
-            );
-        } else {
-            cr.line_to(thick, length);
-        }
+    cr.line_to(geom.thick - geom.curl, geom.bottom);
+    if geom.curl > 0.0 {
+        corner(
+            cr,
+            (geom.thick - geom.curl, geom.bottom),
+            (geom.thick, geom.length),
+            true,
+        );
     }
     cr.close_path();
     let _ = cr.restore();
@@ -740,122 +722,20 @@ fn draw_rim_stroke(cr: &cairo::Context, rail: Rect, edge: Edge, panel: Rect, t: 
     if t <= 0.05 {
         return;
     }
-    let (thick, length) = if edge.vertical() {
-        (rail.w, rail.h)
-    } else {
-        (rail.h, rail.w)
-    };
-
-    let wanted = CORNER.min(thick / 2.0).max(0.0);
-    let curl = CURL.min(length / 2.0).min(thick - wanted).max(0.0);
-    let corner = wanted.min((length - 2.0 * curl) / 2.0).max(0.0);
-    let (top, bottom) = (curl, length - curl);
-
-    let canon = canonical_panel(panel, rail, edge);
-    let t_geom = t.clamp(0.0, 1.05);
-    let d = (canon.depth * t_geom).max(0.0);
-    if d < 1.0 {
+    let geom = IslandGeom::new(rail, edge, panel, t, 0.0, 0.0);
+    if geom.d < 1.0 {
         return;
     }
-
-    let v_mid = (canon.v1 + canon.v2) / 2.0;
-    let target_hw = (canon.v2 - canon.v1) / 2.0;
-    let init_hw = (RING_D / 2.0).min(target_hw);
-    let hw = init_hw + (target_hw - init_hw) * t.clamp(0.0, 1.0);
-
-    let v1 = (v_mid - hw).max(0.0);
-    let v2 = (v_mid + hw).min(length);
-
-    let rc = CARD_CORNER.min(d / 2.0).min((v2 - v1) / 2.0).max(0.0);
-
-    let avail_left = v1 - (top + corner);
-    let rf_left = if avail_left > 0.0 {
-        FILLET_R
-            .min(d / 2.0)
-            .min((v2 - v1) / 4.0)
-            .min(avail_left)
-            .max(0.0)
-    } else {
-        0.0
-    };
-
-    let avail_right = (bottom - corner) - v2;
-    let rf_right = if avail_right > 0.0 {
-        FILLET_R
-            .min(d / 2.0)
-            .min((v2 - v1) / 4.0)
-            .min(avail_right)
-            .max(0.0)
-    } else {
-        0.0
-    };
-
     let rim_alpha = ((t - 0.1) / 0.9).clamp(0.0, 1.0);
 
     let _ = cr.save();
-    cr.translate(rail.x, rail.y);
-    match edge {
-        Edge::Right => {}
-        Edge::Left => cr.transform(cairo::Matrix::new(-1.0, 0.0, 0.0, 1.0, thick, 0.0)),
-        Edge::Top => cr.transform(cairo::Matrix::new(0.0, -1.0, 1.0, 0.0, 0.0, thick)),
-        Edge::Bottom => cr.transform(cairo::Matrix::new(0.0, 1.0, -1.0, 0.0, length, 0.0)),
-    }
+    apply_canonical_transform(cr, rail, edge, geom.thick, geom.length);
 
     cr.new_path();
-    if avail_left > 0.0 {
-        cr.move_to(0.0, v1 - rf_left);
-        if rf_left > 0.0 {
-            cr.curve_to(
-                0.0,
-                v1 - rf_left + rf_left * KAPPA1,
-                -rf_left * (1.0 - KAPPA2),
-                v1,
-                -rf_left,
-                v1,
-            );
-        }
-    } else {
-        cr.move_to(0.0, v1);
-    }
-    cr.line_to(-d + rc, v1);
-    if rc > 0.0 {
-        cr.curve_to(
-            -d + rc * (1.0 - KAPPA1),
-            v1,
-            -d,
-            v1 + rc * (1.0 - KAPPA2),
-            -d,
-            v1 + rc,
-        );
-    }
-    cr.line_to(-d, v2 - rc);
-    if rc > 0.0 {
-        cr.curve_to(
-            -d,
-            v2 - rc + rc * KAPPA1,
-            -d + rc * (1.0 - KAPPA2),
-            v2,
-            -d + rc,
-            v2,
-        );
-    }
-    if avail_right > 0.0 {
-        cr.line_to(-rf_right, v2);
-        if rf_right > 0.0 {
-            cr.curve_to(
-                -rf_right * (1.0 - KAPPA2),
-                v2,
-                0.0,
-                v2 + rf_right - rf_right * KAPPA1,
-                0.0,
-                v2 + rf_right,
-            );
-        }
-    } else {
-        cr.line_to(0.0, v2);
-    }
+    cr.move_to(0.0, geom.v1 - geom.rf_left);
+    geom.draw_panel_perimeter(cr);
 
-    let g = cairo::LinearGradient::new(0.0, 0.0, -d, 0.0);
+    let g = cairo::LinearGradient::new(0.0, 0.0, -geom.d, 0.0);
     g.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.22 * rim_alpha);
     g.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.04 * rim_alpha);
     cr.set_line_width(1.0);
@@ -875,34 +755,13 @@ fn squircle_path(cr: &cairo::Context, rect: Rect, r: f64) {
     }
     cr.move_to(x + r, y);
     cr.line_to(x + w - r, y);
-    cr.curve_to(
-        x + w - r + r * KAPPA1,
-        y,
-        x + w,
-        y + r * (1.0 - KAPPA2),
-        x + w,
-        y + r,
-    );
+    corner(cr, (x + w - r, y), (x + w, y + r), true);
     cr.line_to(x + w, y + h - r);
-    cr.curve_to(
-        x + w,
-        y + h - r + r * KAPPA1,
-        x + w - r * (1.0 - KAPPA2),
-        y + h,
-        x + w - r,
-        y + h,
-    );
+    corner(cr, (x + w, y + h - r), (x + w - r, y + h), false);
     cr.line_to(x + r, y + h);
-    cr.curve_to(
-        x + r - r * KAPPA1,
-        y + h,
-        x,
-        y + h - r * (1.0 - KAPPA2),
-        x,
-        y + h - r,
-    );
+    corner(cr, (x + r, y + h), (x, y + h - r), true);
     cr.line_to(x, y + r);
-    cr.curve_to(x, y + r - r * KAPPA1, x + r * (1.0 - KAPPA2), y, x + r, y);
+    corner(cr, (x, y + r), (x + r, y), false);
     cr.close_path();
 }
 
@@ -995,17 +854,22 @@ pub fn draw(
                 let _ = cr.save();
                 island_path(cr, l.rail, edge, rect, t, 0.0, 0.0);
                 cr.clip();
-                cr.push_group();
-                match o.kind {
+                let draw_content = |cr: &cairo::Context| match o.kind {
                     Kind::Card => {
                         if let Some(ring) = rings.get(o.ring) {
                             card(cr, rect, ring);
                         }
                     }
                     Kind::Menu => menu(cr, rect, hot),
+                };
+                if content_alpha < 1.0 {
+                    cr.push_group();
+                    draw_content(cr);
+                    let _ = cr.pop_group_to_source();
+                    let _ = cr.paint_with_alpha(content_alpha);
+                } else {
+                    draw_content(cr);
                 }
-                let _ = cr.pop_group_to_source();
-                let _ = cr.paint_with_alpha(content_alpha);
                 let _ = cr.restore();
             }
         }
@@ -1395,6 +1259,84 @@ mod tests {
         // An accent overrides the scale outright.
         assert_eq!(band(0.9, Some(FALLBACK)), FALLBACK);
     }
+
+    #[test]
+    fn island_path_has_no_diagonal_rail_shortcuts_when_panel_clamped() {
+        let rings: Vec<Ring> = (0..3).map(|_| ring(3)).collect();
+        for edge in [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom] {
+            for hover in [0, rings.len() - 1] {
+                let l = layout(&rings, edge, card_on(hover));
+                let panel = l.panel.expect("hover opens a card");
+                let surf = cairo::ImageSurface::create(
+                    cairo::Format::ARgb32,
+                    l.w as i32 + 1,
+                    l.h as i32 + 1,
+                )
+                .unwrap();
+                let cr = cairo::Context::new(&surf).unwrap();
+                island_path(&cr, l.rail, edge, panel, 1.0, 0.0, 0.0);
+                let path = cr.copy_path().unwrap();
+                let mut prev = (0.0, 0.0);
+                for seg in path.iter() {
+                    match seg {
+                        cairo::PathSegment::MoveTo((x, y)) => prev = (x, y),
+                        cairo::PathSegment::LineTo((x, y)) => {
+                            let dx = (x - prev.0).abs();
+                            let dy = (y - prev.1).abs();
+                            assert!(
+                                dx < 1e-4 || dy < 1e-4,
+                                "{edge:?} hover {hover}: diagonal line from ({:.1}, {:.1}) to ({:.1}, {:.1}) (dx={:.1}, dy={:.1})",
+                                prev.0,
+                                prev.1,
+                                x,
+                                y,
+                                dx,
+                                dy
+                            );
+                            prev = (x, y);
+                        }
+                        cairo::PathSegment::CurveTo(_, _, (x, y)) => prev = (x, y),
+                        cairo::PathSegment::ClosePath => {}
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn centered_panel_and_notch_flares_are_mirror_symmetric() {
+        let rings: Vec<Ring> = (0..3).map(|_| ring(3)).collect();
+        let l = layout(&rings, Edge::Right, None);
+        let mid = l.rail.h / 2.0;
+        let card_h = 40.0;
+        let centered_panel = Rect {
+            x: l.rail.x - 50.0,
+            y: mid - card_h / 2.0,
+            w: 50.0,
+            h: card_h,
+        };
+        let geom = IslandGeom::new(l.rail, Edge::Right, centered_panel, 1.0, 0.0, 0.0);
+        assert!(
+            (geom.v1 - (mid - card_h / 2.0)).abs() < 1e-4,
+            "v1 should be centered around mid"
+        );
+        assert!(
+            (geom.v2 - (mid + card_h / 2.0)).abs() < 1e-4,
+            "v2 should be centered around mid"
+        );
+        assert!(
+            (geom.rf_left - geom.rf_right).abs() < 1e-4,
+            "fillet radii are not mirror symmetric: left={:.2}, right={:.2}",
+            geom.rf_left,
+            geom.rf_right
+        );
+        assert!(
+            (geom.top - (geom.length - geom.bottom)).abs() < 1e-4,
+            "flares are not mirror symmetric: top={:.2}, bottom_dist={:.2}",
+            geom.top,
+            geom.length - geom.bottom
+        );
+    }
 }
 
 /// Renders the notch to a PNG with the same readings as upstream's design frame,
@@ -1573,6 +1515,5 @@ fn preview() {
 
     let mut f = std::fs::File::create("/tmp/linotch-preview.png").unwrap();
     surf.write_to_png(&mut f).unwrap();
-    let _ = std::fs::copy("/tmp/linotch-preview.png", "docs/preview.png");
-    eprintln!("wrote /tmp/linotch-preview.png and docs/preview.png ({total_w}x{total_h})");
+    eprintln!("wrote /tmp/linotch-preview.png ({total_w}x{total_h})");
 }
